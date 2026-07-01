@@ -70,8 +70,160 @@ class RecommendationResponse(BaseModel):
     w_local_3_confidence: Optional[float] = None
     intervention: Optional[InterventionInfo] = None
     proposal_is_no_op: bool = False
+    # Daily total vehicle-hours saved (positive) or added (negative) by Webster's
+    # proposal, summed across TOD chunks. Lets the dashboard reconcile a
+    # volume-based "signalize" verdict with the delay-based outcome without
+    # fetching the full simulation per row. Null when no simulation rows exist.
+    webster_vh_saved_per_day: Optional[float] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+def _compute_intervention_for_rec(
+    db: Session,
+    rec: models.Recommendation,
+    intersection: models.Intersection,
+) -> Optional[dict]:
+    """Derive the intervention dict for one rec (ORM-row variant).
+
+    Mirrors `_intervention_for` in `list_recommendations` so that history,
+    generate, generate-all, and notes-update responses all surface the same
+    intervention class for the same rec. Without this, the /history endpoint
+    (used by `recommendationsApi.latest`) returned `intervention=null` for
+    every recommendation, which made the Timing tab disagree with the
+    dashboard for any intersection where the list path *did* derive a class.
+
+    Returns None when the verdict isn't actionable (timing_only on an
+    unsignalized intersection, or timing_only on a no-op Webster proposal).
+    """
+    is_signalized = (intersection.signal_status or "").lower() in (
+        "fixed_time", "actuated",
+    )
+    row = db.execute(text("""
+        SELECT MAX(vc_ratio_after) AS max_vc
+          FROM simulation_results
+         WHERE recommendation_id = :rid
+           AND chunk_name != 'overall'
+    """), {"rid": rec.id}).fetchone()
+    critical_vc = float(row.max_vc) if row and row.max_vc is not None else 0.0
+
+    warrant_results = {
+        "w1":        (bool(rec.warrant_1_met),  float(rec.warrant_1_confidence  or 0)),
+        "w2":        (bool(rec.warrant_2_met),  float(rec.warrant_2_confidence  or 0)),
+        "w4":        (bool(rec.warrant_4_met),  float(rec.warrant_4_confidence  or 0)),
+        "w_local_1": (bool(rec.w_local_1_met),  float(rec.w_local_1_confidence  or 0)),
+        "w_local_2": (bool(rec.w_local_2_met),  float(rec.w_local_2_confidence  or 0)),
+        "w_local_3": (bool(rec.w_local_3_met),  float(rec.w_local_3_confidence  or 0)),
+    }
+    cls = assign_intervention_label(
+        critical_vc=critical_vc,
+        is_signalized=is_signalized,
+        warrant_results=warrant_results,
+    )
+    if cls == "timing_only" and bool(rec.proposal_is_no_op):
+        return None
+    if cls == "timing_only" and not is_signalized:
+        return None
+    return {"class": cls, "confidence": float(rec.recommended_confidence or 0)}
+
+
+@router.get("/model-info")
+def model_info(request: Request) -> dict:
+    """Return metadata describing the currently-loaded warrant CNN.
+
+    Surfaces the deployed model's identity (synthetic-trained vs real-trained
+    Toronto checkpoint) so the dashboard can render a visible badge and the
+    panel-defense demo can show the swap is live. Always 200: when no
+    recommender is loaded, returns the scalar-baseline fallback marker.
+    """
+    artifacts = getattr(request.app.state, "recommender_artifacts", None)
+    if artifacts is None:
+        return {
+            "mode":     "scalar_baseline",
+            "loaded":   False,
+            "detail":   "TemporalWarrantCNN unavailable; falling back to WarrantMLP.",
+        }
+    model = artifacts.model
+    training_metadata = {}
+    # The checkpoint dict survives only until load_recommender, so we re-read
+    # the path's training_metadata here to surface the seed + train_loss the
+    # panel-defense guide cites. Skipping if the env path is missing avoids a
+    # crash on misconfigured deployments.
+    import os
+    from pathlib import Path
+    import torch
+    ckpt_path_env = os.getenv("TEMPORAL_CNN_MODEL_PATH")
+    ckpt_path = Path(ckpt_path_env) if ckpt_path_env else None
+    if ckpt_path and ckpt_path.exists():
+        try:
+            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+            training_metadata = ckpt.get("training_metadata", {}) or {}
+        except Exception as exc:                                # noqa: BLE001
+            log.warning("model-info: could not re-read checkpoint metadata: %s", exc)
+    # Variant label is inferred from the warrant head count: 4 heads = real-data
+    # retrain (Toronto TMC), 6 heads = synthetic baseline. Anything else is logged
+    # as "custom" so unexpected checkpoint variants surface in the dashboard
+    # instead of being silently mislabeled.
+    n_warrants = len(artifacts.warrant_names)
+    if n_warrants == 6:
+        variant = "synthetic_baseline"
+        source  = "Tagum-realistic synthetic generator (server.ml.synthetic_traffic)"
+    elif n_warrants == 4:
+        variant = "real_trained_toronto"
+        source  = "Toronto Open Data Multimodal TMC (rule-labelled real flows)"
+    else:
+        variant = "custom"
+        source  = f"{n_warrants}-head checkpoint, unrecognised variant"
+    return {
+        "mode":                 "temporal_cnn",
+        "loaded":               True,
+        "variant":              variant,
+        "training_data_source": source,
+        "checkpoint_path":      str(ckpt_path) if ckpt_path else None,
+        "warrant_names":        list(artifacts.warrant_names),
+        "intervention_classes": list(artifacts.intervention_classes),
+        "metadata_features":    list(artifacts.metadata_features),
+        "n_warrants":           n_warrants,
+        "training_metadata":    training_metadata,
+    }
+
+
+def _timing_overall_for_rec(db: Session, rec_id: int) -> tuple[int | None, str | None]:
+    """Return (cycle_length, chunk_name) for the 'overall' timing row, if any.
+
+    Mirrors the JOIN in `list_recommendations` so the history/notes endpoints
+    surface the same `timing_cycle` field the dashboard sees. Without this,
+    `deriveIntersectionAction` on the frontend falls through to "No action
+    required" on the detail page while the dashboard correctly shows "Adjust".
+    """
+    tr = (
+        db.query(models.TimingRecommendation)
+        .filter_by(recommendation_id=rec_id, chunk_name="overall")
+        .first()
+    )
+    if tr is None:
+        return None, None
+    return int(tr.cycle_length), tr.chunk_name
+
+
+def _webster_vh_saved_for_rec(db: Session, rec_id: int) -> float | None:
+    """Sum vehicle_hours_saved across non-overall sim chunks for one rec.
+
+    Returns None when no simulation rows exist (Webster never ran for this rec).
+    A negative value is a real signal: Webster's proposal would *add* delay
+    relative to the baseline (common when signalising a free-flow intersection
+    that trips a volume warrant on a single peak hour).
+    """
+    row = db.execute(text("""
+        SELECT COALESCE(SUM(vehicle_hours_saved), 0)::float AS total,
+               COUNT(*)                                       AS n
+          FROM simulation_results
+         WHERE recommendation_id = :rid
+           AND chunk_name != 'overall'
+    """), {"rid": rec_id}).fetchone()
+    if row is None or int(row.n) == 0:
+        return None
+    return float(row.total)
 
 
 def _compute_features_from_rows(rows) -> dict[str, float]:
@@ -353,10 +505,37 @@ def _analyze(
                 "hour_start":             hour_start,
                 "notes":                  None,
             }
-            intervention_info = {
-                "class": result.intervention,
-                "confidence": round(conf, 4),
+            # Reconcile the CNN's intervention head with its own warrant heads
+            # using the same rules `_intervention_for` (list path) applies, so
+            # generate-all and list responses agree on the same intersection.
+            # The CNN can emit 'signalize' even when none of w1/w2/w4 cleared
+            # 0.5 (independent output heads); without this guard those flow
+            # through as actionable "Install signal" rows on the dashboard.
+            is_signalized = (intersection.signal_status or "").lower() in (
+                "fixed_time", "actuated",
+            )
+            warrant_results = {
+                "w1": (w1 >= 0.5, float(w1)),
+                "w2": (w2 >= 0.5, float(w2)),
+                "w4": (w4 >= 0.5, float(w4)),
             }
+            # We don't have post-Webster critical_vc yet (simulation runs after
+            # _analyze). Use the CNN's widening prediction as a proxy: if the
+            # CNN said road_widening, treat critical_vc as saturated so the
+            # rules engine preserves that verdict. Otherwise default to 0.
+            critical_vc_proxy = 1.0 if result.intervention == "road_widening" else 0.0
+            cls = assign_intervention_label(
+                critical_vc=critical_vc_proxy,
+                is_signalized=is_signalized,
+                warrant_results=warrant_results,
+            )
+            # Same drop conditions as _intervention_for: nonsensical 'timing_only'
+            # on an unsignalized intersection (no signal to tune) → suppress so
+            # the dashboard doesn't surface a phantom action.
+            if cls == "timing_only" and not is_signalized:
+                intervention_info = None
+            else:
+                intervention_info = {"class": cls, "confidence": round(conf, 4)}
             return analysis, intervention_info
         except Exception:
             log.exception(
@@ -417,6 +596,7 @@ def _rec_to_response(
     timing_cycle: int | None = None,
     timing_chunk: str | None = None,
     intervention: Optional[dict] = None,
+    webster_vh_saved_per_day: float | None = None,
 ) -> dict:
     return {
         "id": rec.id,
@@ -449,10 +629,11 @@ def _rec_to_response(
         "w_local_3_confidence": rec.w_local_3_confidence,
         "intervention": intervention,
         "proposal_is_no_op": bool(rec.proposal_is_no_op),
+        "webster_vh_saved_per_day": webster_vh_saved_per_day,
     }
 
 
-@router.get("/", response_model=list[RecommendationResponse])
+@router.get("/", response_model=list[RecommendationResponse], response_model_by_alias=True)
 def list_recommendations(
     db: Annotated[Session, Depends(get_db)],
     user: Annotated[models.User, Depends(get_current_user)],
@@ -484,7 +665,11 @@ def list_recommendations(
             r.proposal_is_no_op,
             (SELECT MAX(vc_ratio_after)
                FROM simulation_results
-              WHERE recommendation_id = r.id) AS max_vc_after
+              WHERE recommendation_id = r.id) AS max_vc_after,
+            (SELECT SUM(vehicle_hours_saved)
+               FROM simulation_results
+              WHERE recommendation_id = r.id
+                AND chunk_name != 'overall') AS webster_vh_saved
         FROM recommendations r
         JOIN intersections i ON i.id = r.intersection_id
         LEFT JOIN timing_recommendations tr
@@ -511,6 +696,22 @@ def list_recommendations(
             is_signalized=is_signalized,
             warrant_results=warrant_results,
         )
+        # Reconcile with Webster's: if the rules engine says "tweak the timing"
+        # but the simulation found no chunk where the proposal beats existing
+        # (proposal_is_no_op), there is nothing to suggest. Returning None keeps
+        # the dashboard and the detail page in agreement - the detail page's
+        # websterFindsNoBenefit branch already renders "timing already near-
+        # optimal" for the same condition.
+        if cls == "timing_only" and bool(r.proposal_is_no_op):
+            return None
+        # 'timing_only' for an unsignalized intersection is nonsensical - there
+        # is no signal to adjust the timing of. This happens when the rules
+        # engine's fall-through case fires: no warrant met AND critical_vc was
+        # computed as 0 because the intersection has no TOD chunks configured
+        # (so generate_simulation returns []). Returning None tells the dashboard
+        # to drop the row instead of inventing an "Adjust timing 40s" verdict.
+        if cls == "timing_only" and not is_signalized:
+            return None
         # Confidence: use the recommendation's overall confidence as a stand-in -
         # the rules engine doesn't emit one and the UI just needs a number for
         # the percentage badge.
@@ -548,6 +749,9 @@ def list_recommendations(
             "w_local_3_confidence": r.w_local_3_confidence,
             "proposal_is_no_op": bool(r.proposal_is_no_op),
             "intervention": _intervention_for(r),
+            "webster_vh_saved_per_day": (
+                float(r.webster_vh_saved) if r.webster_vh_saved is not None else None
+            ),
         }
         for r in rows
     ]
@@ -607,6 +811,25 @@ def _maybe_generate_timing_and_sim(
         db.add(sr)
     db.flush()
 
+    # Silent-failure guard: generate_simulation iterates over TOD chunks. When
+    # the intersection has none configured (common for incompletely-set-up
+    # intersections) the loop runs zero times and returns []. Without this log
+    # the only symptom is the dashboard rendering misleading verdicts because
+    # critical_vc / vh_saved end up null. Logging it makes the setup gap
+    # discoverable from server logs instead of by debugging the UI.
+    if not sim_rows:
+        tod_count = (
+            db.query(models.TodChunk)
+            .filter_by(intersection_id=intersection.id)
+            .count()
+        )
+        log.warning(
+            "simulation yielded 0 rows for intersection %d (rec %d) - "
+            "tod_chunks=%d, signal_status=%s. Recommendation will lack "
+            "critical_vc / vh_saved, which suppresses widening/timing verdicts.",
+            intersection.id, rec.id, tod_count, status,
+        )
+
     # Case 2: already signalized + Webster never beats existing → keep the rows
     # but flag the recommendation as a no-op so the UI can render them in a
     # muted/comparison mode rather than as a "recommended" plan. Dropping the
@@ -622,7 +845,7 @@ def _maybe_generate_timing_and_sim(
     return timing_rows, peak_chunk
 
 
-@router.post("/generate/{intersection_id}", response_model=RecommendationResponse)
+@router.post("/generate/{intersection_id}", response_model=RecommendationResponse, response_model_by_alias=True)
 def generate_recommendation(
     intersection_id: int,
     request: Request,
@@ -669,7 +892,12 @@ def generate_recommendation(
         intersection.name,
         timing_cycle=overall.cycle_length if overall else None,
         timing_chunk=peak_chunk,
-        intervention=intervention,
+        # Use the same intervention helper the list/history paths use, now that
+        # the freshly-generated simulation rows are in place — `_analyze`'s
+        # CNN-head prediction is informational only and we don't want it to
+        # disagree with what the dashboard will see on the next list call.
+        intervention=_compute_intervention_for_rec(db, rec, intersection),
+        webster_vh_saved_per_day=_webster_vh_saved_for_rec(db, rec.id),
     )
 
 
@@ -718,7 +946,8 @@ def run_generate_all(
                 intersection.name,
                 timing_cycle=overall.cycle_length if overall else None,
                 timing_chunk=peak_chunk,
-                intervention=intervention,
+                intervention=_compute_intervention_for_rec(db, rec, intersection),
+                webster_vh_saved_per_day=_webster_vh_saved_for_rec(db, rec.id),
             ))
             db.commit()
         except Exception:
@@ -728,7 +957,7 @@ def run_generate_all(
     return results
 
 
-@router.post("/generate-all", response_model=list[RecommendationResponse])
+@router.post("/generate-all", response_model=list[RecommendationResponse], response_model_by_alias=True)
 @limiter.limit("10/minute")
 def generate_all_recommendations(
     request: Request,
@@ -747,7 +976,7 @@ class NotesUpdate(BaseModel):
     notes: Optional[str]
 
 
-@router.patch("/{rec_id}/notes", response_model=RecommendationResponse)
+@router.patch("/{rec_id}/notes", response_model=RecommendationResponse, response_model_by_alias=True)
 def update_notes(
     rec_id: int,
     body: NotesUpdate,
@@ -764,10 +993,20 @@ def update_notes(
     db.commit()
     db.refresh(rec)
 
-    return _rec_to_response(rec, intersection.name if intersection else "")
+    cycle, chunk = _timing_overall_for_rec(db, rec.id)
+    return _rec_to_response(
+        rec,
+        intersection.name if intersection else "",
+        timing_cycle=cycle,
+        timing_chunk=chunk,
+        intervention=(
+            _compute_intervention_for_rec(db, rec, intersection) if intersection else None
+        ),
+        webster_vh_saved_per_day=_webster_vh_saved_for_rec(db, rec.id),
+    )
 
 
-@router.get("/history/{intersection_id}", response_model=list[RecommendationResponse])
+@router.get("/history/{intersection_id}", response_model=list[RecommendationResponse], response_model_by_alias=True)
 def list_history(
     intersection_id: int,
     db: Annotated[Session, Depends(get_db)],
@@ -789,7 +1028,20 @@ def list_history(
         .all()
     )
     log.info("history intersection=%d limit=%d → %d rows", intersection_id, limit, len(rows))
-    return [_rec_to_response(rec, intersection.name) for rec in rows]
+    responses = []
+    for rec in rows:
+        cycle, chunk = _timing_overall_for_rec(db, rec.id)
+        responses.append(
+            _rec_to_response(
+                rec,
+                intersection.name,
+                timing_cycle=cycle,
+                timing_chunk=chunk,
+                intervention=_compute_intervention_for_rec(db, rec, intersection),
+                webster_vh_saved_per_day=_webster_vh_saved_for_rec(db, rec.id),
+            )
+        )
+    return responses
 
 
 _DOW_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]

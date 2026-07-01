@@ -267,8 +267,13 @@ export function VideosPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold tracking-tight">Videos</h1>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-semibold tracking-tight">Videos</h1>
+          <p className="text-sm text-muted-foreground mt-0.5 print:hidden">
+            Upload archived footage to backfill counts when a camera was offline.
+          </p>
+        </div>
         <Button size="sm" onClick={() => setShowUpload(v => !v)}>
           <Upload className="size-3.5 mr-1.5" />
           Upload Video

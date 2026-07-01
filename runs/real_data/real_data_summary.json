@@ -1,0 +1,70 @@
+{
+  "source": "toronto_open_data_multimodal_tmc",
+  "license": "Open Government Licence - Toronto",
+  "n_intersections": 600,
+  "n_samples": 873,
+  "warrant_names": [
+    "w1",
+    "w2",
+    "w3",
+    "w4"
+  ],
+  "metadata_features": [
+    "major_lanes",
+    "minor_lanes",
+    "posted_speed_kph",
+    "is_signalized",
+    "n_approaches"
+  ],
+  "ped_source": "toronto_real",
+  "study_slot_count": 56,
+  "data_seed": 42,
+  "split_seed": 7,
+  "splits": {
+    "train": {
+      "n_samples": 691,
+      "n_intersections": 480,
+      "intervention_class_counts": {
+        "signalize": 40,
+        "road_widening": 570,
+        "timing_only": 81
+      },
+      "warrant_positive_rates": {
+        "w1": 0.710564374923706,
+        "w2": 0.6555716395378113,
+        "w3": 0.5600578784942627,
+        "w4": 0.5788711905479431
+      }
+    },
+    "val": {
+      "n_samples": 89,
+      "n_intersections": 60,
+      "intervention_class_counts": {
+        "signalize": 6,
+        "road_widening": 72,
+        "timing_only": 11
+      },
+      "warrant_positive_rates": {
+        "w1": 0.7752808928489685,
+        "w2": 0.7078651785850525,
+        "w3": 0.6067415475845337,
+        "w4": 0.6292135119438171
+      }
+    },
+    "test": {
+      "n_samples": 93,
+      "n_intersections": 60,
+      "intervention_class_counts": {
+        "signalize": 6,
+        "road_widening": 77,
+        "timing_only": 10
+      },
+      "warrant_positive_rates": {
+        "w1": 0.7204301357269287,
+        "w2": 0.698924720287323,
+        "w3": 0.5913978219032288,
+        "w4": 0.5053763389587402
+      }
+    }
+  }
+}

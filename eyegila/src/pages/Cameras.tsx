@@ -176,6 +176,9 @@ export function CamerasPage() {
       <div className="flex items-end justify-between gap-3 flex-wrap">
         <div>
           <h1 className="text-xl font-semibold tracking-tight">Cameras</h1>
+          <p className="text-sm text-muted-foreground mt-0.5 print:hidden">
+            Connect, preview, and assign cameras to intersection approaches.
+          </p>
           <p className="text-xs text-muted-foreground mt-0.5">
             {counts.all} camera{counts.all !== 1 ? 's' : ''} · {counts.offline} offline · {counts.reconnecting} reconnecting
           </p>

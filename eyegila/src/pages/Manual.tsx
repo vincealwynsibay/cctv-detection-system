@@ -1,3 +1,5 @@
+import { useEffect, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -7,6 +9,15 @@ import {
   MapPin, Camera, Layers, BarChart3, GitBranch,
   Lightbulb, Info, AlertTriangle, ArrowRight,
 } from 'lucide-react';
+
+const MANUAL_TABS = ['quickstart', 'intersections', 'cameras', 'regions', 'monitoring', 'warrants'] as const;
+type ManualTab = typeof MANUAL_TABS[number];
+
+function readTabFromSearch(search: string): ManualTab {
+  const params = new URLSearchParams(search);
+  const v = params.get('tab');
+  return MANUAL_TABS.includes(v as ManualTab) ? (v as ManualTab) : 'quickstart';
+}
 
 function Sub({ children }: { children: React.ReactNode }) {
   return <h3 className="text-sm font-semibold text-foreground mt-5 mb-2 first:mt-0">{children}</h3>;
@@ -65,6 +76,22 @@ function SectionHead({ Icon, color, children }: {
 }
 
 export function ManualPage() {
+  const { search, hash } = useLocation();
+  const [tab, setTab] = useState<ManualTab>(() => readTabFromSearch(search));
+
+  useEffect(() => {
+    setTab(readTabFromSearch(search));
+  }, [search]);
+
+  useEffect(() => {
+    if (!hash) return;
+    const id = hash.slice(1);
+    const t = window.setTimeout(() => {
+      document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 50);
+    return () => window.clearTimeout(t);
+  }, [hash, tab]);
+
   return (
     <div className="flex flex-col gap-6 max-w-3xl">
       <div>
@@ -74,7 +101,7 @@ export function ManualPage() {
         </p>
       </div>
 
-      <Tabs defaultValue="quickstart">
+      <Tabs value={tab} onValueChange={v => setTab(v as ManualTab)}>
         <TabsList className="flex-wrap h-auto gap-1 mb-2">
           <TabsTrigger value="quickstart">Quick Start</TabsTrigger>
           <TabsTrigger value="intersections">Intersections</TabsTrigger>
@@ -406,7 +433,7 @@ export function ManualPage() {
                 ))}
               </div>
 
-              <Sub>Running a Recommendation</Sub>
+              <Sub><span id="recommendation" className="scroll-mt-20">Running a Recommendation</span></Sub>
               <Step n={1}>Navigate to <strong>Recommendations</strong>.</Step>
               <Step n={2}>Select the intersection to analyze.</Step>
               <Step n={3}>Click <strong>Generate</strong>. The system queries the last 7 days of aggregated data.</Step>

@@ -11,7 +11,6 @@ import { streetsApi } from '@/services/streets';
 import { intersectionsApi } from '@/services/intersections';
 import { recommendationsApi, type RecommendationResponse } from '@/services/recommendations';
 import { IntersectionSummary } from '@/components/IntersectionSummary';
-import { IntersectionTabs } from '@/components/IntersectionTabs';
 import { ARM_SHORT, GanttDiagram, LosBadge } from '@/components/signal-timing-viz';
 import { selectPeakChunk } from '@/lib/simulation';
 import type { SignalTimingPayload } from '@/services/intersections';
@@ -28,11 +27,11 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { ArrowLeft, TrendingDown, Printer, Play, Pause, Columns2, MonitorPlay, X, Pencil, History, Loader2, FlaskConical, RefreshCw, Info } from 'lucide-react';
+import { TrendingDown, Printer, Play, Pause, Columns2, MonitorPlay, X, Pencil, History, Loader2, FlaskConical, RefreshCw, Info } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
-
-const APPROACH_COLORS = ['#6366f1', '#f59e0b', '#10b981', '#ef4444', '#8b5cf6', '#06b6d4'];
+import { JargonTip } from '@/components/JargonTip';
+import { deriveIntersectionAction, MONITOR_THRESHOLD_VH } from '@/lib/intersectionAction';
 
 // Mirrors TOD_DEFAULTS in Intersections.tsx and server/tod.py so clicking a
 // period pill can populate the "Analyse a specific window" inputs with the
@@ -266,12 +265,76 @@ function TrafficTimeline({ intersectionId, onRange }: TrafficTimelineProps) {
     applySelection(a, b);
   }
 
+  // Range used by the "Peak hour" preset, so its chip can show the same
+  // HH–HH hint format the other presets use.
+  const peakRange: [number, number] = [Math.max(0, peakHour - 1), Math.min(24, peakHour + 2)];
+  const peakActive = bars[peakHour]?.count > 0 && selA === peakRange[0] && selB === peakRange[1] - 1;
+
   return (
-    <div className="flex flex-col gap-2">
-      {/* Controls row */}
-      <div className="flex items-center gap-2 flex-wrap">
+    <div className="flex flex-col gap-2.5">
+      {/* TOD-chunk presets - the primary way to pick a window. One click fills
+          the range with a system-defined period (Overnight / AM Rush / Midday
+          / PM Rush / Evening), matching the chunks the recommendation engine
+          and per-chunk filter row use further down. "Peak hour" picks the
+          busiest hour ± 1 from today's bar data. Each chip shows its HH-HH
+          hint so the operator doesn't have to remember the bounds. */}
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="text-[10px] uppercase tracking-wide font-semibold text-muted-foreground mr-0.5">
+          Preset
+        </span>
+        <button type="button" onClick={selectPeakHour}
+          disabled={!bars[peakHour]?.count}
+          title={bars[peakHour]?.count ? `Peak hour ± 1 (${pad2(peakRange[0])}:00–${pad2(peakRange[1])}:00)` : 'No traffic data for this date'}
+          className={cn(
+            'h-8 px-2.5 text-[11px] rounded-md border transition-all font-medium flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed',
+            peakActive
+              ? 'border-amber-500 bg-amber-100 text-amber-800 dark:bg-amber-900/50 dark:text-amber-200 dark:border-amber-600 shadow-sm'
+              : 'border-amber-400/60 text-amber-700 dark:text-amber-300 bg-amber-50/70 dark:bg-amber-950/30 hover:bg-amber-100 dark:hover:bg-amber-900/40',
+          )}>
+          <span className="text-[10px]">▲</span>
+          <span>Peak hour</span>
+          {bars[peakHour]?.count > 0 && (
+            <span className="font-mono tabular-nums opacity-70 text-[10px]">
+              {pad2(peakRange[0])}–{pad2(peakRange[1])}
+            </span>
+          )}
+        </button>
+        {([
+          ['Overnight', 0,  6],
+          ['AM Rush',   6,  9],
+          ['Midday',    9, 12],
+          ['PM Rush',  12, 18],
+          ['Evening',  18, 24],
+          ['Full day',  0, 24],
+        ] as const).map(([label, h1, h2]) => {
+          const active = selA === h1 && selB === h2 - 1;
+          return (
+            <button key={label} type="button" onClick={() => selectPreset(h1, h2)}
+              title={`${label} · ${pad2(h1)}:00–${pad2(h2)}:00`}
+              className={cn(
+                'h-8 px-2.5 text-[11px] rounded-md border transition-all font-medium flex items-center gap-1.5',
+                active
+                  ? 'border-teal-500 bg-teal-100 text-teal-800 dark:bg-teal-900/50 dark:text-teal-200 dark:border-teal-600 shadow-sm'
+                  : 'border-border bg-card text-foreground/80 hover:bg-muted hover:border-foreground/30',
+              )}>
+              <span>{label}</span>
+              <span className="font-mono tabular-nums opacity-60 text-[10px]">
+                {pad2(h1)}–{pad2(h2)}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Date row - the secondary control. Lives below the presets so the
+          primary action (pick a chunk) reads first. */}
+      <div className="flex items-center gap-2 flex-wrap text-[10px]">
+        <span className="uppercase tracking-wide font-semibold text-muted-foreground">
+          Day
+        </span>
         <div className="flex items-center gap-1">
           <button type="button" onClick={() => shiftDate(-1)}
+            title="Previous day"
             className="size-7 flex items-center justify-center rounded border border-border text-muted-foreground hover:bg-muted transition-colors text-base leading-none">
             ‹
           </button>
@@ -280,41 +343,86 @@ function TrafficTimeline({ intersectionId, onRange }: TrafficTimelineProps) {
             className="h-7 text-xs px-2 rounded border border-input bg-background font-mono focus:outline-none focus:ring-1 focus:ring-ring"
           />
           <button type="button" onClick={() => shiftDate(1)} disabled={date >= today}
+            title="Next day"
             className="size-7 flex items-center justify-center rounded border border-border text-muted-foreground hover:bg-muted transition-colors text-base leading-none disabled:opacity-30">
             ›
           </button>
         </div>
-
-        <div className="flex gap-1 flex-wrap">
-          <button type="button" onClick={selectPeakHour}
-            className="h-6 px-2 text-[10px] rounded border border-amber-400/50 text-amber-600 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/30 transition-colors font-medium">
-            ▲ Peak
-          </button>
-          {([['AM', 6, 12], ['PM', 12, 19], ['Full day', 0, 24]] as const).map(([label, h1, h2]) => (
-            <button key={label} type="button" onClick={() => selectPreset(h1, h2)}
-              className="h-6 px-2 text-[10px] rounded border border-border text-muted-foreground hover:bg-muted transition-colors">
-              {label}
-            </button>
-          ))}
-        </div>
-
-        {tlLoading && <span className="text-[10px] text-muted-foreground animate-pulse ml-auto">loading…</span>}
+        {tlLoading && <span className="text-muted-foreground animate-pulse ml-1">loading…</span>}
       </div>
 
-      {/* Waveform */}
+      {/* Y-axis caption above the chart - kept on its own row so it can't
+          collide with the controls row or the y-axis gutter. */}
+      <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
+        <span>↑ Vehicles per hour (vph)</span>
+        <JargonTip term="vph" size={11} />
+      </div>
+
+      {/* Chart layout: y-axis labels live in a normal-colored gutter to the
+          left of the dark canvas (high contrast, not washed out behind bars),
+          and every hour 1..24 gets its own tick under the x-axis. The dark
+          canvas is the pointer target, so hour-from-clientX math stays clean. */}
+      <div className="flex items-stretch gap-2">
+        {/* Y-axis gutter. Sits outside the dark waveform on the card background
+            so labels read as regular text instead of fighting bar gradients. */}
+        <div className="relative shrink-0 w-9" style={{ height: 140 }}>
+          {(() => {
+            // Bars span the top 88% of the 140px canvas (12% top padding for
+            // the gradient highlight), with 24px reserved at the bottom for the
+            // hour axis. Convert that bar zone into the y-tick coordinates.
+            const bottomReservedPct = (24 / 140) * 100;
+            const barTopPct = 12;
+            const barBottomPct = 100 - bottomReservedPct;
+            const ticks: { value: number; topPct: number }[] = [
+              { value: maxCount,                 topPct: barTopPct },
+              { value: Math.round(maxCount / 2), topPct: (barTopPct + barBottomPct) / 2 },
+              { value: 0,                        topPct: barBottomPct },
+            ];
+            return ticks.map((t, i) => (
+              <div
+                key={i}
+                className="absolute right-1 text-[11px] text-muted-foreground font-mono tabular-nums"
+                style={{ top: `${t.topPct}%`, transform: 'translateY(-50%)' }}
+              >
+                {t.value.toLocaleString()}
+              </div>
+            ));
+          })()}
+        </div>
+
+      {/* Waveform - the dark canvas. containerRef points here so pointer-hour
+          math (x within the bar area / width * 24) remains correct after the
+          y-axis was moved out. */}
       <div
         ref={containerRef}
-        className="relative rounded-lg overflow-hidden border border-border select-none"
-        style={{ height: 130, background: '#070d19', cursor: dragging ? 'col-resize' : 'crosshair', touchAction: 'none' }}
+        className="relative flex-1 rounded-lg overflow-hidden border border-border select-none"
+        style={{ height: 140, background: '#070d19', cursor: dragging ? 'col-resize' : 'crosshair', touchAction: 'none' }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerLeave={() => { setDragging(false); setHovered(null); }}
       >
-        {/* Subtle grid lines at 6h */}
+        {/* Empty-state overlay - shown when the day has no detections at all.
+            Without this the bars all stub at the floor and operators don't
+            know whether the page is broken or the day was genuinely quiet. */}
+        {!tlLoading && bars.every(b => b.count === 0) && (
+          <div className="absolute inset-0 bottom-6 flex flex-col items-center justify-center gap-1 text-white/60 pointer-events-none z-10">
+            <span className="text-xs font-medium">No detections recorded for this day</span>
+            <span className="text-[10px] text-white/40">Try an earlier date with the arrows above</span>
+          </div>
+        )}
+
+        {/* Subtle vertical grid lines at 6h */}
         {[6, 12, 18].map(h => (
-          <div key={h} className="absolute top-0 bottom-6 w-px bg-white/[0.04]"
+          <div key={h} className="absolute top-0 bottom-6 w-px bg-white/[0.06]"
             style={{ left: `${(h / 24) * 100}%` }} />
+        ))}
+
+        {/* Horizontal y-grid lines at each tick row so the bar tops line up
+            with the y-axis labels on the left. */}
+        {[0.12, 0.56, 0.857].map((topFrac, i) => (
+          <div key={i} className="absolute inset-x-0 h-px bg-white/[0.08] pointer-events-none"
+            style={{ top: `${topFrac * 100}%` }} />
         ))}
 
         {/* Selection overlay + handles */}
@@ -390,33 +498,45 @@ function TrafficTimeline({ intersectionId, onRange }: TrafficTimelineProps) {
           </div>
         )}
 
-        {/* Hour axis */}
-        <div className="absolute inset-x-0 bottom-0 h-6 flex items-center">
-          {[0, 3, 6, 9, 12, 15, 18, 21].map(h => (
-            <div key={h} className="absolute text-[8px] text-white/20 font-mono"
-              style={{ left: `${(h / 24) * 100}%`, transform: 'translateX(-50%)' }}>
-              {pad2(h)}
-            </div>
-          ))}
+        {/* Hour axis. Every hour 1..24 gets a tick under the bar it belongs to
+            (centred on the bar's mid-point). 1..23 read as the start of each
+            hour; 24 reads as end-of-day on the right edge. tabular-nums keeps
+            the two-digit ticks aligned at this tight pitch. */}
+        <div className="absolute inset-x-0 bottom-0 h-6 border-t border-white/10">
+          {Array.from({ length: 24 }, (_, h) => h + 1).map(h => {
+            const barIndex = h - 1; // ticks point at the bar for hour (h-1)..h
+            return (
+              <div
+                key={h}
+                className="absolute top-1 text-[10px] text-white/70 font-mono tabular-nums leading-none"
+                style={{ left: `${((barIndex + 0.5) / 24) * 100}%`, transform: 'translateX(-50%)' }}
+              >
+                {h}
+              </div>
+            );
+          })}
         </div>
       </div>
+      </div>
 
-      {/* Selection summary / hint */}
+      {/* X-axis label */}
+      <p className="text-[10px] text-muted-foreground text-center -mt-1">Hour of day (1 = 00:00 to 01:00 ... 24 = 23:00 to 24:00)</p>
+
+      {/* Selection summary / hint - shows only what isn't already obvious from
+          the chart: a vehicle count + window length when a range is picked, or
+          a drag hint when nothing is selected. Time range is shown next to the
+          Run analysis button so the action and its target stay paired. */}
       {selA !== null && selB !== null ? (
         <div className="flex items-center gap-2 text-xs">
-          <span className="font-mono font-semibold text-teal-600 dark:text-teal-400">
-            {pad2(selA)}:00 – {pad2(Math.min(selB + 1, 24))}:00
+          <span className="text-muted-foreground">
+            <span className="font-semibold text-foreground">{selCount.toLocaleString()}</span> vehicles in this window
           </span>
           <span className="text-muted-foreground">·</span>
-          <span className="text-muted-foreground">{selCount.toLocaleString()} vehicles detected</span>
-          {selB > selA && (
-            <><span className="text-muted-foreground">·</span>
-            <span className="text-muted-foreground">{selB - selA + 1}h window</span></>
-          )}
+          <span className="text-muted-foreground">{selB - selA + 1}h span</span>
         </div>
       ) : (
         <p className="text-[10px] text-muted-foreground">
-          Drag to select a range · click a bar for a single hour · color = traffic density
+          Tip: drag across the bars for a custom range, or click a single bar for one hour. Color = traffic density.
         </p>
       )}
     </div>
@@ -455,9 +575,9 @@ export function SignalTimingPage() {
   const [sbs3D, setSbs3D] = useState(false);
   const [paused3D, setPaused3D] = useState(false);
   // 1× = real-time (sim seconds advance at wall clock). Previously 1× meant
-  // 15× wall clock, which played a full 60 s cycle in ~4 real seconds — too
+  // 15× wall clock, which played a full 60 s cycle in ~4 real seconds - too
   // fast to watch during demos. 8× is kept as the "skip ahead" option.
-  const [speed3D, setSpeed3D] = useState<1 | 4 | 8>(1);
+  const [speed3D, setSpeed3D] = useState<1 | 4 | 8 | 16 | 32 | 64>(1);
   const [presentMode, setPresentMode] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [editSaving, setEditSaving] = useState(false);
@@ -493,8 +613,12 @@ export function SignalTimingPage() {
     const start = new Date(end.getTime() - 3600 * 1000);
 
     try {
+      // Absorb a missing-simulation error so unsignalized + not-warranted
+      // intersections (where Webster never ran) still load - operators
+      // need the "Analyse a specific window" panel to drill into past
+      // dates regardless of whether a recommendation exists.
       const [sim, tim, agg, allStreets, inter, latestRec] = await Promise.all([
-        simulationApi.get(intersectionId),
+        simulationApi.get(intersectionId).catch(() => null),
         timingApi.list(intersectionId).catch(() => [] as TimingChunk[]),
         aggregationApi.history({
           start: start.toISOString(),
@@ -691,38 +815,88 @@ export function SignalTimingPage() {
     setSelectedChunk(null);
   }
 
-  return (
-    <div className="flex flex-col gap-5 print:gap-2">
-      {/* Header */}
-      <div className="flex items-center gap-3 print:hidden">
-        <Button variant="ghost" size="icon" className="size-8" onClick={() => navigate(-1)}>
-          <ArrowLeft className="size-4" />
-        </Button>
-        <div className="flex-1">
-          <h1 className="text-xl font-semibold tracking-tight">
-            {displayData ? displayData.intersection_name : 'Signal Timing'}
-          </h1>
-          {displayData && (
-            <p className="text-xs text-muted-foreground mt-0.5">
-              Analytical delay simulation · {displayData.signal_status.replace('_', ' ')}
-              {histMode && <span className="ml-1.5 text-teal-600 dark:text-teal-400">· historical window</span>}
+  // Replay panel JSX as a closure so it can be slotted both right under the
+  // Findings card (the default position when a recommendation exists) and
+  // under the empty-state banner (so historical drill-down still works for
+  // intersections with no rec). Styled to match the Findings card baseline so
+  // it reads as a sibling card, not a separate widget.
+  function renderReplayPanel() {
+    return (
+      <div className={cn(
+        'rounded-xl border bg-card p-4 print:hidden transition-colors',
+        histMode ? 'border-teal-400/60 ring-1 ring-teal-400/20' : 'border-border',
+      )}>
+        <div className="flex items-start gap-2.5 mb-3">
+          <div className="rounded-lg bg-teal-100 dark:bg-teal-900/40 p-1.5 mt-0.5 shrink-0">
+            <History className="size-3.5 text-teal-700 dark:text-teal-300" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <h2 className="text-sm font-semibold leading-tight">Replay a specific window</h2>
+            <p className="text-[11px] text-muted-foreground mt-0.5">
+              One-click a TOD chunk, or drag the bars for a custom range. Webster re-runs on real detections from that window.
             </p>
+          </div>
+          {histMode && (
+            <span className="text-[10px] text-teal-700 dark:text-teal-300 font-medium flex items-center gap-1 bg-teal-100/80 dark:bg-teal-900/40 px-2 py-0.5 rounded-full whitespace-nowrap">
+              <FlaskConical className="size-3" /> Real-data window
+            </span>
           )}
         </div>
-        {intersection && !histMode && (
-          <Button
-            data-testid="btn-analyse-timing"
-            variant="ghost"
-            size="sm"
-            className="h-8 text-xs gap-1.5"
-            onClick={runAnalyse}
-            disabled={generating}
-            title="Run warrant analysis"
-          >
-            {generating ? <Loader2 className="size-3 animate-spin" /> : <RefreshCw className="size-3" />}
-            {generating ? 'Analysing…' : 'Analyse'}
-          </Button>
-        )}
+
+        <TrafficTimeline
+          intersectionId={intersectionId}
+          onRange={(start, end, vph) => { setHistStart(start); setHistEnd(end); setHistVph(vph); }}
+        />
+
+        <div className="flex items-center gap-2 mt-3 pt-3 border-t border-border flex-wrap">
+          {histStart && histEnd ? (
+            <div className="flex items-center gap-2 text-xs">
+              <span className="text-muted-foreground">Selected:</span>
+              <span className="font-mono tabular-nums font-semibold text-teal-700 dark:text-teal-300">
+                {histStart.slice(11, 16)} – {histEnd.slice(11, 16)}
+              </span>
+              <span className="text-muted-foreground/70 font-mono text-[10px]">{histStart.slice(0, 10)}</span>
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground italic">
+              Pick a preset above or drag the timeline to choose a window
+            </p>
+          )}
+          <div className="flex items-center gap-2 ml-auto">
+            {histMode && (
+              <Button size="sm" variant="outline" onClick={exitHistMode}>
+                Back to current
+              </Button>
+            )}
+            <Button
+              data-testid="btn-analyse"
+              size="sm"
+              onClick={analyseWindow}
+              disabled={histLoading || !histStart || !histEnd}
+              className={cn(
+                histStart && histEnd && !histLoading && !histMode &&
+                'bg-teal-600 hover:bg-teal-700 text-white shadow-md ring-2 ring-teal-400/30',
+              )}
+            >
+              {histLoading ? <Loader2 className="size-3.5 animate-spin mr-1.5" /> : <FlaskConical className="size-3.5 mr-1.5" />}
+              {histLoading ? 'Analysing…' : 'Run analysis'}
+            </Button>
+          </div>
+        </div>
+        {histError && <p className="text-xs text-rose-600 mt-2">{histError}</p>}
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-5 print:gap-2">
+      {/* Tab-local action row - Analyse and Settings live on the parent shell.
+          Only Edit timing + Print stay here since they're tab-specific. */}
+      <div className="flex items-center gap-2 flex-wrap print:hidden">
+        <p className="text-xs text-muted-foreground flex-1">
+          {displayData?.signal_status.replace('_', ' ')}
+          {histMode && <span className="ml-1.5 text-teal-600 dark:text-teal-400">· historical window</span>}
+        </p>
         {intersection && !histMode && (
           <Button data-testid="btn-edit-timing" variant="outline" size="sm" onClick={openEdit}>
             <Pencil className="size-3.5 mr-1.5" />
@@ -735,7 +909,6 @@ export function SignalTimingPage() {
             Print / Export PDF
           </Button>
         )}
-        {id && <IntersectionTabs intersectionId={id} />}
       </div>
 
       {/* Print header - only visible when printing */}
@@ -754,6 +927,27 @@ export function SignalTimingPage() {
           {error}
         </div>
       )}
+
+      {/* Empty-state when no recommendation has been generated yet (typical
+          for unsignalized + not-warranted intersections). Keeps the
+          Analyse-window panel visible below so operators can still drill
+          into historical date ranges. */}
+      {!loading && !displayData && !error && (
+        <div className="rounded-lg border border-border bg-muted/30 p-4 text-sm">
+          <p className="font-medium">No timing recommendation generated.</p>
+          <p className="text-xs text-muted-foreground mt-1">
+            {intersection?.signal_status === 'unsignalized'
+              ? 'This intersection is unsignalized and current volumes don’t trigger any warrant. You can still analyse historical windows below.'
+              : 'Run analysis from the parent header to generate a timing comparison. You can also analyse a historical window below.'}
+          </p>
+        </div>
+      )}
+
+      {/* Replay panel is rendered further down (right under Findings) so the
+          headline the engineer came to see sits at the top of the tab. When
+          there's no recommendation at all, we still render it here so
+          historical drill-down stays reachable. */}
+      {!loading && !error && !displayData && renderReplayPanel()}
 
       {displayData && !loading && (
         <>
@@ -792,7 +986,7 @@ export function SignalTimingPage() {
             <div className="rounded-lg border border-emerald-200 bg-emerald-50 dark:bg-emerald-950/20 dark:border-emerald-900 px-4 py-3 text-xs text-emerald-800 dark:text-emerald-300">
               <span className="font-semibold">No retune recommended.</span>{' '}
               Existing signal timing already meets or beats Webster's proposal at every TOD chunk.
-              The simulation below is shown for comparison only — applying the proposed splits would
+              The simulation below is shown for comparison only - applying the proposed splits would
               not improve average delay on any chunk by the {'≥'} 0.5 s/veh threshold.
             </div>
           )}
@@ -805,82 +999,127 @@ export function SignalTimingPage() {
             </div>
           )}
 
-          {/* Analyse a specific window */}
-          <div className="rounded-lg border border-border bg-card p-4 print:hidden">
-            <div className="flex items-center gap-2 mb-3">
-              <History className="size-3.5 text-muted-foreground" />
-              <h2 className="text-sm font-semibold">Analyse a specific window</h2>
-              {histMode && (
-                <span className="ml-auto text-[10px] text-teal-600 dark:text-teal-400 font-medium flex items-center gap-1">
-                  <FlaskConical className="size-3" /> Showing real-data window
-                </span>
-              )}
-            </div>
-
-            <TrafficTimeline
-              intersectionId={intersectionId}
-              onRange={(start, end, vph) => { setHistStart(start); setHistEnd(end); setHistVph(vph); }}
-            />
-
-            <div className="flex items-center gap-2 mt-3">
-              <Button data-testid="btn-analyse" size="sm" onClick={analyseWindow} disabled={histLoading || !histStart || !histEnd}>
-                {histLoading ? <Loader2 className="size-3.5 animate-spin mr-1.5" /> : <FlaskConical className="size-3.5 mr-1.5" />}
-                {histLoading ? 'Analysing…' : 'Analyse'}
-              </Button>
-              {histStart && histEnd && (
-                <span className="text-xs text-muted-foreground font-mono">
-                  {histStart.slice(0, 10)} · {histStart.slice(11, 16)} – {histEnd.slice(11, 16)}
-                </span>
-              )}
-              {histMode && (
-                <Button size="sm" variant="outline" onClick={exitHistMode} className="ml-auto">
-                  Back to current
-                </Button>
-              )}
-            </div>
-            {histError && <p className="text-xs text-rose-600 mt-2">{histError}</p>}
-          </div>
-
-          {/* Verdict card */}
+          {/* Findings panel - the reconciled recommendation (single source of
+              truth shared with the Dashboard and Live tab) plus Webster's
+              raw delay numbers, side by side, so engineers can audit both. */}
           {(() => {
             const totalVhSaved = displayData.daily_summary.total_vehicle_hours_saved;
-            const isUnsignalized = displayData.signal_status === 'unsignalized';
-            const positive = totalVhSaved > 0;
-            // This verdict is Webster's-based: "would changing the timing save
-            // vehicle-hours?". It is independent of the MUTCD warrant check on
-            // the Dashboard - an intersection can be MUTCD-warranted (volumes
-            // above threshold) yet still produce no measurable timing benefit
-            // if traffic is flat across all TOD chunks. Wording reflects that
-            // so the two views don't appear to contradict each other.
-            const verdict = isUnsignalized
-              ? (positive
-                  ? 'Signal installation reduces delay'
-                  : 'Adding a signal would not reduce delay')
-              : (positive
-                  ? 'Re-timing reduces delay'
-                  : 'Current timing already near-optimal');
+            const peakVhChunk = displayData.chunks.length > 0
+              ? [...displayData.chunks].sort((a, b) => b.vehicle_hours_saved - a.vehicle_hours_saved)[0]
+              : null;
+            const peakVhSaved = peakVhChunk?.vehicle_hours_saved ?? 0;
+            const websterPositive = peakVhSaved > 0;
+            const action = deriveIntersectionAction(rec, intersection, { sim: displayData });
+            // Near-break-even guard: when the reconciled banner says "install
+            // signal" with the engineering-noise footnote, the raw Webster tile
+            // should match that framing instead of loudly contradicting it with
+            // a red "signal adds delay" headline. Same number, honest framing.
+            const negligibleDelay =
+              action.kind === 'install_signal' &&
+              Math.abs(totalVhSaved) < MONITOR_THRESHOLD_VH;
+            // Tone for the headline mirrors the dashboard banner colour family.
+            const headlineClass = action.tone === 'good'
+              ? 'text-emerald-700 dark:text-emerald-400'
+              : action.tone === 'warn'
+              ? 'text-amber-700 dark:text-amber-400'
+              : action.tone === 'info'
+              ? 'text-sky-700 dark:text-sky-400'
+              : 'text-muted-foreground';
             return (
-              <div className={cn(
-                'rounded-xl border p-5 flex flex-col gap-1 print:hidden',
-                positive
-                  ? 'border-emerald-300 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-950/30'
-                  : 'border-border bg-card',
-              )}>
-                <p className="text-[11px] uppercase tracking-widest font-medium text-muted-foreground">Verdict</p>
-                <p className={cn(
-                  'text-2xl font-bold leading-tight',
-                  positive ? 'text-emerald-700 dark:text-emerald-400' : 'text-foreground',
-                )}>
-                  {verdict}
+              <div className="rounded-xl border border-border bg-card p-5 flex flex-col gap-3 print:hidden">
+                <p className="text-[11px] uppercase tracking-widest font-medium text-muted-foreground">
+                  Findings
                 </p>
-                <p className="text-xs text-muted-foreground mt-0.5">
-                  {positive
-                    ? `Webster's optimised timing saves ${totalVhSaved.toFixed(1)} vehicle-hours per day across all periods.`
-                    : 'Webster’s model finds no measurable delay reduction at current flows. The MUTCD warrant check on the Dashboard answers a different question (does volume exceed the threshold) and may still flag this intersection.'}
-                </p>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  {/* Reconciled recommendation - matches Dashboard and Live tab */}
+                  <div className="flex flex-col gap-1">
+                    <p className="text-[10px] uppercase tracking-wide text-muted-foreground inline-flex items-center gap-1">
+                      Recommended action
+                      <JargonTip term="mutcd" />
+                    </p>
+                    <p className={cn('text-xl font-bold leading-tight', headlineClass)}>
+                      {action.headline}
+                    </p>
+                    <p className="text-xs text-muted-foreground">{action.detail}</p>
+                  </div>
+
+                  {/* Webster's operational-cost / delay-impact panel. Label
+                      flips with the action: an install_signal verdict with
+                      near-zero vh_saved reads as "operational cost: negligible"
+                      so the panel tells the same story as the banner. A
+                      positive Webster number is always good news, regardless
+                      of which action verdict the helper picked. */}
+                  <div className="flex flex-col gap-1">
+                    <p className="text-[10px] uppercase tracking-wide text-muted-foreground inline-flex items-center gap-1">
+                      {negligibleDelay ? 'Operational cost (Webster)' : 'Delay impact (Webster)'}
+                      <JargonTip term="websters" />
+                    </p>
+                    <p className={cn(
+                      'text-xl font-bold leading-tight tabular-nums',
+                      websterPositive
+                        ? 'text-emerald-700 dark:text-emerald-400'
+                        : negligibleDelay
+                          ? 'text-muted-foreground'
+                          : 'text-foreground',
+                    )}>
+                      {websterPositive
+                        ? `+${peakVhSaved.toFixed(1)} vh/day at ${peakVhChunk?.chunk_name}`
+                        : negligibleDelay
+                          ? 'Negligible (within engineering noise)'
+                          : totalVhSaved < 0
+                            ? `${totalVhSaved.toFixed(1)} vh/day, signal adds delay`
+                            : 'No net delay reduction'}
+                    </p>
+                    <p className="text-xs text-muted-foreground inline-flex items-center gap-1">
+                      Daily total: <span className="font-medium tabular-nums">
+                        {totalVhSaved >= 0 ? '+' : ''}{totalVhSaved.toFixed(1)} vh/day
+                      </span>
+                      <JargonTip term="vh_saved" />
+                    </p>
+                  </div>
+                </div>
+
+                {/* Per-chunk breakdown */}
+                {displayData.chunks.length > 1 && (
+                  <div className="flex flex-wrap gap-1.5 pt-1 border-t border-border">
+                    <p className="basis-full text-[10px] uppercase tracking-wide text-muted-foreground mb-1 mt-2 inline-flex items-center gap-1">
+                      Per period <JargonTip term="tod_chunk" />
+                    </p>
+                    {displayData.chunks.map(c => (
+                      <span
+                        key={c.chunk_name}
+                        className={cn(
+                          'text-[11px] px-2 py-0.5 rounded border tabular-nums',
+                          c.vehicle_hours_saved > 0
+                            ? 'border-emerald-300 text-emerald-700 dark:border-emerald-800 dark:text-emerald-400'
+                            : 'border-border text-muted-foreground',
+                        )}
+                      >
+                        {c.chunk_name}: {c.vehicle_hours_saved >= 0 ? '+' : ''}
+                        {c.vehicle_hours_saved.toFixed(1)} vh
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                {action.contradictionFlagged && (
+                  <p className="text-xs italic text-muted-foreground leading-relaxed border-t border-border pt-3">
+                    MUTCD warrants check a single peak hour against count thresholds; Webster's
+                    integrates delay across the whole day. When the warrant trips on a brief peak
+                    but most of the day is free-flow, adding a signal imposes idle red-time delay
+                    on empty approaches - Webster scores that as worse, not better. Both models
+                    are correct; the headline reflects the daily picture.
+                  </p>
+                )}
               </div>
             );
           })()}
+
+          {/* Replay panel as a sibling card to Findings - so the engineer
+              sees the headline first, then has the drill-down tool right
+              next to it without having to scroll past anything else. */}
+          {renderReplayPanel()}
 
           {/* Global chunk filter */}
           <div className="flex flex-wrap items-center gap-1.5 print:hidden">
@@ -921,13 +1160,16 @@ export function SignalTimingPage() {
             const delayAfter  = displayChunk ? displayChunk.delay_after  : displayData.daily_summary.avg_delay_after;
             const losAfter    = displayChunk ? displayChunk.los_after    : displayData.daily_summary.los_after;
             const vhSaved     = displayChunk ? displayChunk.vehicle_hours_saved : displayData.daily_summary.total_vehicle_hours_saved;
-            const totalFlow   = displayChunk ? displayChunk.volume_pcu_hr       : displayData.daily_summary.total_volume_pcu_hr;
-            const flowLabel   = displayChunk ? 'PCU/hr this period' : (histMode ? 'PCU measured this window' : 'PCU across all periods');
+            // "Total flow" (PCU/hr) card was cut here too — same reason as the
+            // IntersectionReport page: PCU is a jargon unit and the plain
+            // veh/hr Major/Minor figure in Findings covers the same ground.
             const vhLabel     = displayChunk ? 'vh saved this period' : (histMode ? 'vh for this window' : 'vh saved per day');
             return (
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div className="rounded-lg border border-border bg-card p-4 print:p-3">
-                  <p className="text-xs text-muted-foreground">Avg delay before</p>
+                  <p className="text-xs text-muted-foreground inline-flex items-center gap-1">
+                    Avg delay before <JargonTip term="los" />
+                  </p>
                   <p className="text-xl font-semibold mt-1">{fmt(delayBefore)}</p>
                   <div className="flex items-center gap-1.5 mt-1">
                     <p className="text-xs text-muted-foreground">per vehicle</p>
@@ -935,7 +1177,9 @@ export function SignalTimingPage() {
                   </div>
                 </div>
                 <div className="rounded-lg border border-border bg-card p-4 print:p-3">
-                  <p className="text-xs text-muted-foreground">Avg delay after</p>
+                  <p className="text-xs text-muted-foreground inline-flex items-center gap-1">
+                    Avg delay after <JargonTip term="websters" />
+                  </p>
                   <p className="text-xl font-semibold mt-1 text-emerald-600">{fmt(delayAfter)}</p>
                   <div className="flex items-center gap-1.5 mt-1">
                     <p className="text-xs text-muted-foreground">per vehicle</p>
@@ -943,16 +1187,13 @@ export function SignalTimingPage() {
                   </div>
                 </div>
                 <div className="rounded-lg border border-border bg-card p-4 print:p-3">
-                  <p className="text-xs text-muted-foreground">Vehicle-hours saved</p>
+                  <p className="text-xs text-muted-foreground inline-flex items-center gap-1">
+                    Vehicle-hours saved <JargonTip term="vh_saved" />
+                  </p>
                   <p className={cn('text-xl font-semibold mt-1', vhSaved > 0 && 'text-emerald-600')}>
                     {vhSaved.toFixed(1)} vh
                   </p>
                   <p className="text-xs text-muted-foreground mt-1">{vhLabel}</p>
-                </div>
-                <div className="rounded-lg border border-border bg-card p-4 print:p-3">
-                  <p className="text-xs text-muted-foreground">Total flow</p>
-                  <p className="text-xl font-semibold mt-1">{totalFlow.toFixed(0)}</p>
-                  <p className="text-xs text-muted-foreground mt-1">{flowLabel}</p>
                 </div>
               </div>
             );
@@ -960,7 +1201,9 @@ export function SignalTimingPage() {
 
           {/* LOS legend */}
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground print:hidden">
-            <span className="font-medium text-foreground">LOS grade:</span>
+            <span className="font-medium text-foreground inline-flex items-center gap-1">
+              LOS grade: <JargonTip term="los" />
+            </span>
             {([
               ['A', '≤10s - free flow'],
               ['B', '10–20s - stable'],
@@ -1167,7 +1410,7 @@ export function SignalTimingPage() {
 
                   {/* Speed - shared for both 2D and 3D */}
                   <div className="flex rounded-md border border-border overflow-hidden">
-                    {([1, 4, 8] as const).map(s => (
+                    {([1, 4, 8, 16, 32, 64] as const).map(s => (
                       <button
                         key={s}
                         onClick={() => setSpeed3D(s)}
@@ -1271,59 +1514,11 @@ export function SignalTimingPage() {
             </div>
           )}
 
-          {/* Calculation basis */}
-          {activeTiming && (
-            <div className="rounded-lg border border-border bg-card p-5 print:hidden">
-              <h2 className="text-sm font-semibold mb-3">Calculation basis - {activeTiming.chunk_name}</h2>
-
-              {activeTiming.assumptions && (
-                <div className="mb-4">
-                  <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-2">Webster's formula parameters</div>
-                  <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
-                    {Object.entries(activeTiming.assumptions).map(([k, v]) => (
-                      <div key={k} className="rounded-md border border-border bg-muted/30 px-2 py-1.5 text-center">
-                        <div className="text-[9px] text-muted-foreground uppercase tracking-wide leading-tight">
-                          {k.replace(/_/g, ' ')}
-                        </div>
-                        <div className="text-xs font-semibold mt-0.5">{String(v)}</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {activeTiming.measured_flows && Object.keys(activeTiming.measured_flows).length > 0 ? (
-                <div>
-                  <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-2">
-                    Observed approach flows - 7-day average (PCU/hr)
-                  </div>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                    {Object.entries(activeTiming.measured_flows).map(([sid, flow], idx) => {
-                      const st = streets.find(s => String(s.id) === sid);
-                      const label = st
-                        ? `${ARM_SHORT[st.arm_direction] ?? '?'} - ${st.name}`
-                        : `Approach ${sid}`;
-                      return (
-                        <div key={sid} className="rounded-md border border-border bg-muted/30 px-2 py-1.5 text-center">
-                          <div
-                            className="text-[9px] uppercase tracking-wide leading-tight"
-                            style={{ color: APPROACH_COLORS[idx % APPROACH_COLORS.length] }}
-                          >
-                            {label}
-                          </div>
-                          <div className="text-xs font-semibold mt-0.5">{flow} PCU/hr</div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              ) : (
-                <p className="text-xs text-muted-foreground">
-                  No observed flow data for this chunk - timing uses minimum cycle length ({activeTiming.cycle_length}s).
-                </p>
-              )}
-            </div>
-          )}
+          {/* "Calculation basis" panel was cut (Webster's parameters +
+              observed flows) — operator-irrelevant and duplicated by
+              Findings (plain veh/hr) and the print export's audit trail.
+              The data still ships in the API response for engineers /
+              panel review. */}
 
           {displayData.chunks.length === 0 && (
             <div className="flex flex-col items-center gap-3 py-16 text-muted-foreground">
@@ -1415,7 +1610,7 @@ export function SignalTimingPage() {
                   {paused3D ? 'Play' : 'Pause'}
                 </button>
                 <div className="flex rounded-md border border-white/20 overflow-hidden">
-                  {([1, 4, 8] as const).map(s => (
+                  {([1, 4, 8, 16, 32, 64] as const).map(s => (
                     <button
                       key={s}
                       onClick={() => setSpeed3D(s)}

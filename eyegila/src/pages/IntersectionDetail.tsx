@@ -1,5 +1,5 @@
-import { useEffect, useState, useCallback, useMemo } from 'react';
-import { useParams, useNavigate, useOutletContext } from 'react-router-dom';
+import { useState, useMemo } from 'react';
+import { useParams } from 'react-router-dom';
 
 function formatSince(iso: string | null | undefined, refMs: number): string {
   if (!iso) return '';
@@ -14,86 +14,54 @@ function formatSince(iso: string | null | undefined, refMs: number): string {
   const d = Math.round(h / 24);
   return `${d}d ago`;
 }
-import { intersectionsApi } from '@/services/intersections';
 import { cctvsApi } from '@/services/cctvs';
-import { streetsApi } from '@/services/streets';
-import { recommendationsApi, type RecommendationResponse } from '@/services/recommendations';
-import { simulationApi, type SimulationResponse } from '@/services/simulation';
+import { recommendationsApi } from '@/services/recommendations';
 import { IntersectionSummary } from '@/components/IntersectionSummary';
-import { IntersectionTabs } from '@/components/IntersectionTabs';
-import type { Intersection, CCTV, Street, AggregationRow } from '@/types';
-import type { SSEStatus } from '@/hooks/useSSE';
-import { SettingsSheet } from '@/components/IntersectionSettingsSheet';
+import { useIntersectionShell } from '@/components/IntersectionShell';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
 import { Card, CardContent } from '@/components/ui/card';
 import {
-  ArrowLeft, Settings2, RefreshCw, Loader2, Activity, TrendingUp, Clock,
-  TrafficCone, Construction, CheckCircle2, Circle,
+  RefreshCw, Loader2, Activity, TrendingUp, Clock,
+  TrafficCone, Construction, CheckCircle2, Circle, Eye,
   Camera, Wifi, WifiOff,
 } from 'lucide-react';
+import { deriveIntersectionAction, type ActionKind } from '@/lib/intersectionAction';
 import { Link } from 'react-router-dom';
-import { statusBucket, BUCKET_LABEL, BUCKET_BADGE_CLASS } from '@/components/recommendations/statusBucket';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
 
+const ACTION_ICONS: Record<ActionKind, typeof CheckCircle2> = {
+  install_signal: TrafficCone,
+  widen_lanes:    Construction,
+  adjust_timing:  Clock,
+  monitor:        Eye,
+  no_action:      CheckCircle2,
+  no_analysis:    Circle,
+};
+
 export function IntersectionDetailPage() {
   const { id }      = useParams<{ id: string }>();
-  const navigate    = useNavigate();
-  const { sseData } = useOutletContext<{ sseData: AggregationRow[] | null; sseStatus: SSEStatus }>();
-
   const interId = Number(id);
 
-  const [intersection, setIntersection] = useState<Intersection | null>(null);
-  const [cameras,      setCameras]      = useState<CCTV[]>([]);
-  const [streets,      setStreets]      = useState<Street[]>([]);
-  const [loading,      setLoading]      = useState(true);
-  const [rec,          setRec]          = useState<RecommendationResponse | null>(null);
-  const [sim,          setSim]          = useState<SimulationResponse | null>(null);
-  const [generating,   setGenerating]   = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  // Shell provides everything the recommended-action banner needs, including
+  // the simulation. Keeping the fetch in the shell ensures Live / Timing /
+  // Report all reconcile against the same Webster numbers.
+  const { intersection, rec, streets, cameras, sim, sseData, refreshShell } = useIntersectionShell();
 
-  const load = useCallback(async () => {
-    try {
-      const [inter, allCams, allStreets] = await Promise.all([
-        intersectionsApi.get(interId),
-        cctvsApi.list(),
-        streetsApi.list().catch(() => [] as Street[]),
-      ]);
-      setIntersection(inter);
-      setCameras(allCams.filter(c => c.intersection_id === interId));
-      setStreets(allStreets.filter(s => s.intersection_id === interId));
-      // latest() returns null when no recommendation exists yet. Any fetch
-      // error (including network failures) is absorbed here so that a missing
-      // badge never blocks the rest of the page from loading. Auth errors are
-      // already handled inside request() before the error is thrown.
-      const [r, s] = await Promise.all([
-        recommendationsApi.latest(interId).catch(() => null),
-        simulationApi.get(interId).catch(() => null),
-      ]);
-      setRec(r);
-      setSim(s);
-    } catch {
-      toast.error('Failed to load intersection');
-    } finally {
-      setLoading(false);
-    }
-  }, [interId]);
+  const [generating, setGenerating] = useState(false);
 
   async function generate() {
     setGenerating(true);
     try {
       await recommendationsApi.generate(interId);
       toast.success('Analysis complete');
-      load();
+      await refreshShell();
     } catch (e: unknown) {
       toast.error(e instanceof Error ? e.message : 'Analysis failed');
     } finally {
       setGenerating(false);
     }
   }
-
-  useEffect(() => { load(); }, [load]);
 
   const liveCount = useMemo(() => {
     let total = 0;
@@ -132,84 +100,12 @@ export function IntersectionDetailPage() {
     return chips;
   }, [rec]);
 
-  const action = useMemo(() => {
-    if (!rec) {
-      return {
-        headline: 'No analysis yet',
-        detail: 'Run a warrant analysis to populate this dashboard.',
-        tone: 'muted' as const,
-        Icon: Circle,
-        isTiming: false,
-      };
-    }
-    const vhSaved = sim?.daily_summary?.total_vehicle_hours_saved ?? null;
-    const websterRules = vhSaved != null;
-    const websterFindsNoBenefit = websterRules && vhSaved <= 0;
+  const action = useMemo(
+    () => deriveIntersectionAction(rec, intersection, { sim }),
+    [rec, intersection, sim],
+  );
 
-    if (rec.intervention?.class === 'road_widening') {
-      return {
-        headline: 'Widen approach lanes',
-        detail: `Post-Webster v/c exceeds 0.90 - signal timing alone cannot clear demand. ${Math.round((rec.intervention.confidence ?? 0) * 100)}% confidence.`,
-        tone: 'warn' as const,
-        Icon: Construction,
-        isTiming: false,
-      };
-    }
-    const wantsSignalize = rec.intervention?.class === 'signalize'
-      || (rec.recommended && rec.intervention == null);
-    if (wantsSignalize) {
-      // Reconcile with Webster's: if the warrant is met but Webster's projects
-      // no delay reduction from adding/optimising a signal, the constraint is
-      // capacity, not control. Treat it as a widening signal so the two views
-      // tell the same story.
-      if (websterFindsNoBenefit) {
-        return {
-          headline: 'Capacity exceeded - widen approach lanes',
-          detail: 'MUTCD volume warrant is met but Webster\'s finds no delay reduction from signalisation. Demand is at capacity; widening is the next lever.',
-          tone: 'warn' as const,
-          Icon: Construction,
-          isTiming: false,
-        };
-      }
-      const conf = rec.intervention?.confidence ?? rec.recommended_confidence ?? 0;
-      return {
-        headline: 'Install traffic signal',
-        detail: websterRules
-          ? `Warrant met and signalisation reduces delay by ${vhSaved.toFixed(1)} vh-hr/day. ${Math.round(conf * 100)}% confidence.`
-          : `Warrant met and intersection is unsignalized. ${Math.round(conf * 100)}% confidence.`,
-        tone: 'good' as const,
-        Icon: TrafficCone,
-        isTiming: false,
-      };
-    }
-    if (rec.timing_cycle != null) {
-      if (websterFindsNoBenefit) {
-        return {
-          headline: 'Current timing already near-optimal',
-          detail: `Webster's projects no measurable delay reduction from adjusting the signal timing. Keep ${rec.timing_cycle}s cycle and monitor.`,
-          tone: 'muted' as const,
-          Icon: CheckCircle2,
-          isTiming: false,
-        };
-      }
-      return {
-        headline: `Adjust timing to ${rec.timing_cycle}s cycle`,
-        detail: websterRules
-          ? `Existing signal stays - recomputed green time per approach saves ${vhSaved.toFixed(1)} vh-hr/day.`
-          : 'Existing signal stays - recompute green time per approach to match current demand.',
-        tone: 'info' as const,
-        Icon: Clock,
-        isTiming: true,
-      };
-    }
-    return {
-      headline: 'No action required',
-      detail: 'Current timing absorbs the demand. Keep monitoring.',
-      tone: 'muted' as const,
-      Icon: CheckCircle2,
-      isTiming: false,
-    };
-  }, [rec, sim]);
+  const ActionIcon = ACTION_ICONS[action.kind];
 
   const actionTone = {
     good:  'border-emerald-500/40 bg-emerald-50 text-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-100',
@@ -220,49 +116,10 @@ export function IntersectionDetailPage() {
 
   return (
     <div className="flex flex-col gap-4">
-      {/* Header */}
-      <div className="flex items-center gap-3">
-        <Button variant="ghost" size="icon" className="size-8 shrink-0" onClick={() => navigate('/')}>
-          <ArrowLeft className="size-4" />
-        </Button>
-        <div className="flex-1 flex items-center gap-2 min-w-0">
-          <h1 className="text-xl font-semibold tracking-tight truncate">
-            {loading ? '…' : (intersection?.name ?? 'Intersection')}
-          </h1>
-          {rec && (
-            <Badge className={cn('shrink-0 text-[10px]', BUCKET_BADGE_CLASS[statusBucket(rec)])}>
-              {BUCKET_LABEL[statusBucket(rec)]}
-            </Badge>
-          )}
-        </div>
-        <div className="flex items-center gap-2 shrink-0">
-          <Button
-            size="sm"
-            variant="ghost"
-            className="h-7 text-xs gap-1.5"
-            onClick={generate}
-            disabled={generating}
-            title="Run warrant analysis"
-          >
-            {generating ? <Loader2 className="size-3 animate-spin" /> : <RefreshCw className="size-3" />}
-            {generating ? 'Analysing…' : 'Analyse'}
-          </Button>
-          <button
-            type="button"
-            onClick={() => setSettingsOpen(true)}
-            className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-            title="Settings"
-          >
-            <Settings2 className="size-4" />
-          </button>
-          {id && <IntersectionTabs intersectionId={id} />}
-        </div>
-      </div>
-
       {/* Recommended action - single decision-level headline */}
       <div className={cn('flex items-start gap-3 rounded-xl border p-4', actionTone)}>
         <div className="rounded-lg bg-white/60 dark:bg-black/30 p-2 shrink-0">
-          <action.Icon className="size-5" />
+          <ActionIcon className="size-5" />
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-baseline gap-2 flex-wrap">
@@ -307,8 +164,21 @@ export function IntersectionDetailPage() {
         </div>
       </div>
 
-      {/* Warrant status chips */}
-      {warrantChips.length > 0 && (
+      {/* Warrant status chips. The chips are MUTCD warrants (W1/W2/W4) plus
+          local variants - they answer "should an unsignalized intersection
+          get a signal?". For intersections that already have one, that
+          question is moot, so reframe the chips as "Volume indicators" so the
+          engineer reads them as informational (audit / future-planning) rather
+          than as a gate on a non-existent installation decision. */}
+      {warrantChips.length > 0 && (() => {
+        const alreadySignalized =
+          intersection != null &&
+          (intersection.signal_status === 'fixed_time' || intersection.signal_status === 'actuated');
+        return (
+        <div className="flex flex-col gap-1.5">
+          <p className="text-[10px] uppercase tracking-wide font-medium text-muted-foreground">
+            {alreadySignalized ? 'Volume indicators (for reference)' : 'Warrant status'}
+          </p>
         <div className="flex flex-wrap gap-1.5">
           {warrantChips.map(chip => (
             <span
@@ -331,7 +201,9 @@ export function IntersectionDetailPage() {
             </span>
           ))}
         </div>
-      )}
+        </div>
+        );
+      })()}
 
       {/* Headline metrics: live daily count + peak hour stats */}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -466,16 +338,6 @@ export function IntersectionDetailPage() {
           rec={rec}
         />
       )}
-
-      <SettingsSheet
-        inter={intersection}
-        streets={streets}
-        cameras={cameras}
-        rec={rec}
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-        onRefresh={load}
-      />
     </div>
   );
 }

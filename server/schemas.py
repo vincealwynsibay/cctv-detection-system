@@ -38,6 +38,7 @@ class IntersectionUpdate(BaseModel):
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     crossing_width_m: Optional[float] = None
+    saturation_flow_pcu_hr: Optional[int] = None
 
 
 class SignalTimingUpdate(BaseModel):
@@ -62,6 +63,8 @@ class IntersectionResponse(IntersectionBase):
     w_local_2_threshold: float = 0.7
     w_local_3_min_pcu: float = 30.0
     crossing_width_m: float = 12.0
+    saturation_flow_pcu_hr: int = 1400
+    dismissed_setup_tasks: list[str] = []
     time: datetime
     model_config = ConfigDict(from_attributes=True)
 

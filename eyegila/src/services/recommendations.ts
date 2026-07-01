@@ -14,6 +14,24 @@ export interface DataHealthResponse {
   high_volume_days_note: string | null;
 }
 
+export type RecommenderMode = 'temporal_cnn' | 'scalar_baseline';
+
+export type RecommenderVariant = 'synthetic_baseline' | 'real_trained_toronto' | 'custom';
+
+export interface RecommenderModelInfo {
+  mode:                  RecommenderMode;
+  loaded:                boolean;
+  variant?:              RecommenderVariant;
+  training_data_source?: string;
+  checkpoint_path?:      string | null;
+  warrant_names?:        string[];
+  intervention_classes?: string[];
+  metadata_features?:    string[];
+  n_warrants?:           number;
+  training_metadata?:    Record<string, unknown>;
+  detail?:               string;
+}
+
 export const recommendationsApi = {
   list(): Promise<RecommendationResponse[]> {
     return request('/recommendations/');
@@ -35,6 +53,9 @@ export const recommendationsApi = {
   },
   dataHealth(intersectionId: number): Promise<DataHealthResponse> {
     return request(`/recommendations/data-health/${intersectionId}`);
+  },
+  modelInfo(): Promise<RecommenderModelInfo> {
+    return request<RecommenderModelInfo>('/recommendations/model-info');
   },
   // Returns the single most-recent recommendation for an intersection, or null
   // if none exists yet. Uses the history endpoint (limit=1) because there is no

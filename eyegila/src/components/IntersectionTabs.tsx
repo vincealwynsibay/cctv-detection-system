@@ -1,15 +1,21 @@
 import { NavLink } from 'react-router-dom';
-import { MonitorPlay, TrendingUp, FileText } from 'lucide-react';
+import { MonitorPlay, TrendingUp, FileText, Sparkles } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface Props {
   intersectionId: number | string;
 }
 
+// Recommendation is the default landing tab (the 4-step decision narrative).
+// The others are role-specific drill-downs: Live (camera feeds + warrant
+// chips), Timing (Webster math + per-chunk splits), Report (printable PDF
+// for handoff). The first tab existing means a user can return to the
+// narrative from any drill-down.
 const TABS = [
-  { to: '',        end: true,  label: 'Live',   icon: MonitorPlay },
-  { to: 'timing',  end: false, label: 'Timing', icon: TrendingUp  },
-  { to: 'report',  end: false, label: 'Report', icon: FileText    },
+  { to: '',        end: true,  label: 'Recommendation', icon: Sparkles    },
+  { to: 'live',    end: false, label: 'Live',           icon: MonitorPlay },
+  { to: 'timing',  end: false, label: 'Timing',         icon: TrendingUp  },
+  { to: 'report',  end: false, label: 'Report',         icon: FileText    },
 ] as const;
 
 export function IntersectionTabs({ intersectionId }: Props) {

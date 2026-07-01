@@ -35,10 +35,17 @@ from sqlalchemy import text
 from common.models import Intersection, TimingRecommendation, TodChunk
 from server.pce import resolve_pce
 
-# Typical saturation flow for Philippine mixed-traffic single-lane approaches.
+# Default saturation flow for Philippine mixed-traffic single-lane approaches.
 # HCM ideal (US) is 1900; local conditions (tricycles, pedicabs, narrow lanes,
-# no strict lane discipline) reduce this to ~1400 PCU/hr.
+# no strict lane discipline) reduce this to ~1400 PCU/hr. Each intersection
+# can override via Intersection.saturation_flow_pcu_hr once calibrated against
+# measured discharge headways.
 SATURATION_FLOW = 1400  # PCU/hr per approach
+
+
+def effective_saturation_flow(intersection: Intersection) -> int:
+    """Per-intersection saturation flow, falling back to the module default."""
+    return getattr(intersection, "saturation_flow_pcu_hr", None) or SATURATION_FLOW
 
 
 # Clockwise phase order matching the physical signal controller rotation.
@@ -59,10 +66,20 @@ def group_phases(
     flows: dict[int, float],
     directions: dict[int, str],
 ) -> list[list[int]]:
-    """Return one independent phase per approach in clockwise rotation order.
+    """Pool opposing approaches into shared phases (standard 2-phase plan).
 
-    Each direction gets its own exclusive green phase (4-phase plan), matching
-    the physical signal controller where only one arm is green at a time.
+    Real 4-way intersections almost always use a 2-phase plan: NB+SB run
+    concurrently on one green (they don't conflict), then EB+WB run on the
+    other. The earlier 4-phase exclusive split was unrealistic — it gave
+    each approach only ~15 s of green at a 90 s cycle, which pinned vc_after
+    at 1.0 for almost every signalize candidate and forced the dashboard to
+    surface "Widen approach lanes" instead of "Install signal".
+
+    Returns one phase per non-conflicting pair: [[NB, SB], [EB, WB]] when
+    both opposing approaches exist. T-junctions (only 3 arms) and unknown-
+    direction streets fall back to one phase per approach so we don't drop
+    them. Saturation flow gating in `compute_timing` already keeps the
+    minimum green long enough for pedestrians.
     """
     by_dir: dict[str, list[int]] = {}
     for sid in flows:
@@ -72,17 +89,113 @@ def group_phases(
     seen: set[int] = set()
     phases: list[list[int]] = []
 
-    for direction in _PHASE_ORDER:
-        for sid in by_dir.get(direction, []):
-            if sid not in seen:
-                phases.append([sid])
-                seen.add(sid)
+    # Phase 1: NB + SB share a green (they don't conflict).
+    ns = by_dir.get("northbound", []) + by_dir.get("southbound", [])
+    if ns:
+        phases.append(list(ns))
+        seen.update(ns)
 
+    # Phase 2: EB + WB share a green.
+    ew = by_dir.get("eastbound", []) + by_dir.get("westbound", [])
+    if ew:
+        phases.append(list(ew))
+        seen.update(ew)
+
+    # Any street whose direction is unknown (or a fifth leg) gets its own
+    # exclusive phase so we don't silently drop it from the timing plan.
     for sid in flows:
         if sid not in seen:
             phases.append([sid])
+            seen.add(sid)
 
     return phases or [[sid] for sid in flows]
+
+
+def vehicle_arrivals_per_second_for_window(
+    db: Session,
+    intersection_id: int,
+    start: datetime,
+    end: datetime,
+) -> dict[int, list[int]]:
+    """Return per-second raw vehicle counts per street for [start, end).
+
+    Same filters as `arrivals_per_second_for_window` but counts each detection
+    as 1 vehicle (no PCE weighting). Used to drive playback animations so the
+    canvas/3D scene spawns vehicles at their actual arrival timestamps.
+    """
+    n_seconds = max(0, int((end - start).total_seconds()))
+    if n_seconds == 0:
+        return {}
+
+    rows = db.execute(text("""
+        SELECT street_id, time
+          FROM detection_street_view
+         WHERE intersection_id = :iid
+           AND street_id IS NOT NULL
+           AND direction IN ('inbound', 'unknown')
+           AND time >= :start
+           AND time <  :end
+           AND object_type NOT IN ('pedestrian', 'person')
+    """), {"iid": intersection_id, "start": start, "end": end}).fetchall()
+
+    counts: dict[int, list[int]] = {}
+    for row in rows:
+        sid = row.street_id
+        bucket = int((row.time - start).total_seconds())
+        if not 0 <= bucket < n_seconds:
+            continue
+        if sid not in counts:
+            counts[sid] = [0] * n_seconds
+        counts[sid][bucket] += 1
+
+    return counts
+
+
+def arrivals_per_second_for_window(
+    db: Session,
+    intersection_id: int,
+    start: datetime,
+    end: datetime,
+    pce_map: dict[str, dict],
+) -> dict[int, list[float]]:
+    """Return per-second PCU arrivals per street for [start, end).
+
+    Replays the actual `detection_street_view` rows: each detection contributes
+    its PCE weight to the second-bucket it landed in. Output is keyed by
+    street_id, value is a list of length floor((end-start).total_seconds())
+    where index t holds PCU arriving in second t (relative to start).
+
+    Used by the on-demand simulation endpoint to drive a real-arrival queue sim
+    instead of a Poisson reconstruction from aggregate flow. The same direction
+    and object-type filters as `pcu_flow_for_window` apply.
+    """
+    n_seconds = max(0, int((end - start).total_seconds()))
+    if n_seconds == 0:
+        return {}
+
+    rows = db.execute(text("""
+        SELECT street_id, object_type, time
+          FROM detection_street_view
+         WHERE intersection_id = :iid
+           AND street_id IS NOT NULL
+           AND direction IN ('inbound', 'unknown')
+           AND time >= :start
+           AND time <  :end
+           AND object_type NOT IN ('pedestrian', 'person')
+    """), {"iid": intersection_id, "start": start, "end": end}).fetchall()
+
+    arrivals: dict[int, list[float]] = {}
+    for row in rows:
+        sid = row.street_id
+        pce = pce_map.get(row.object_type, {}).get("pce", 1.0)
+        bucket = int((row.time - start).total_seconds())
+        if not 0 <= bucket < n_seconds:
+            continue
+        if sid not in arrivals:
+            arrivals[sid] = [0.0] * n_seconds
+        arrivals[sid][bucket] += pce
+
+    return arrivals
 
 
 def pcu_flow_for_window(
@@ -206,6 +319,7 @@ def compute_timing(
     min_cycle: int = 40,
     max_cycle: int = 120,
     crossing_width_m: float = 12.0,
+    saturation_flow: int = SATURATION_FLOW,
 ) -> tuple[int, dict[int, float]]:
     """Return (cycle_length_s, {street_id: green_seconds}) using Webster's formula.
 
@@ -225,7 +339,7 @@ def compute_timing(
 
     # Critical flow ratio = dominant approach in each phase
     y_phases = [
-        max((flows.get(sid, 0.0) for sid in ph), default=0.0) / SATURATION_FLOW
+        max((flows.get(sid, 0.0) for sid in ph), default=0.0) / saturation_flow
         for ph in phases
     ]
     Y = sum(y_phases)
@@ -287,6 +401,7 @@ def generate_timing_for_recommendation(
     min_c          = intersection.min_cycle_length    or 40
     max_c          = intersection.max_cycle_length    or 120
     crossing_width = getattr(intersection, "crossing_width_m", 12.0) or 12.0
+    sat_flow       = effective_saturation_flow(intersection)
 
     chunks = (
         db.query(TodChunk)
@@ -317,7 +432,7 @@ def generate_timing_for_recommendation(
 
         if flows:
             phases = group_phases(flows, directions)
-            cycle, splits = compute_timing(flows, phases, lost_time, all_red, min_c, max_c, crossing_width)
+            cycle, splits = compute_timing(flows, phases, lost_time, all_red, min_c, max_c, crossing_width, sat_flow)
             total_flow = sum(flows.values())
             if total_flow > peak_total_flow:
                 peak_total_flow = total_flow
@@ -414,7 +529,7 @@ def get_latest_timing(
     }
     pce_tier = rows[0].pce_tier_used
     assumptions = {
-        "saturation_flow_pcu_hr": SATURATION_FLOW,
+        "saturation_flow_pcu_hr": effective_saturation_flow(intersection),
         "lost_time_per_phase_s":  intersection.lost_time_per_phase or 4,
         "all_red_clearance_s":    intersection.all_red_clearance or 3,
         "min_cycle_s":            intersection.min_cycle_length or 40,

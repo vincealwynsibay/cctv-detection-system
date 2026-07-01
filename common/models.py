@@ -58,6 +58,13 @@ class Intersection(Base):
     w_local_2_threshold    = Column(Float, nullable=False, server_default="0.7")
     w_local_3_min_pcu      = Column(Float, nullable=False, server_default="30.0")
     crossing_width_m       = Column(Float, nullable=False, server_default="12.0")
+    saturation_flow_pcu_hr = Column(Integer, nullable=False, server_default="1400")
+    # JSON array of task names the operator has snoozed for this intersection
+    # (e.g. ["regions", "timing"]). The Sidebar's Setup Progress popover filters
+    # these out of the "pending" count and surfaces them under a Dismissed
+    # collapsible. Dismissals persist across browsers - they are a deliberate
+    # signal that the intersection doesn't need the task done.
+    dismissed_setup_tasks  = Column(JSON, nullable=False, server_default="[]")
     time                   = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     streets                = relationship("Street",              back_populates="intersection", cascade="all, delete", passive_deletes=True)

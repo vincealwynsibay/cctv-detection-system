@@ -1,0 +1,38 @@
+{
+  "real_data_dir": "runs/real_data",
+  "warrant_names": [
+    "w1",
+    "w2",
+    "w3",
+    "w4"
+  ],
+  "intervention_classes": [
+    "signalize",
+    "road_widening",
+    "timing_only"
+  ],
+  "metadata_features": [
+    "major_lanes",
+    "minor_lanes",
+    "posted_speed_kph",
+    "is_signalized",
+    "n_approaches"
+  ],
+  "n_train_samples": 691,
+  "n_val_samples": 89,
+  "seeds": [
+    0
+  ],
+  "epochs": 100,
+  "batch_size": 64,
+  "lr": 0.001,
+  "loss_type": "uncertainty",
+  "checkpoints": {
+    "seed0": {
+      "path": "runs/real_cnn/real_cnn_seed0.pt",
+      "best_epoch": 47,
+      "best_val_loss": -0.138851468482714,
+      "epochs_run": 62
+    }
+  }
+}

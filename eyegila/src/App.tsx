@@ -12,6 +12,8 @@ import { CamerasPage } from './pages/Cameras';
 import { VideosPage } from './pages/Videos';
 import { IntersectionDetailPage } from './pages/IntersectionDetail';
 import { IntersectionReportPage } from './pages/IntersectionReport';
+import { IntersectionStoryPage } from './pages/IntersectionStory';
+import { IntersectionShell } from './components/IntersectionShell';
 
 export default function App() {
   return (
@@ -31,9 +33,16 @@ export default function App() {
             <Route path="reports" element={<ReportsPage />} />
             <Route path="users" element={<UsersPage />} />
             <Route path="cameras" element={<CamerasPage />} />
-            <Route path="intersections/:id" element={<IntersectionDetailPage />} />
-            <Route path="intersections/:id/timing" element={<SignalTimingPage />} />
-            <Route path="intersections/:id/report" element={<IntersectionReportPage />} />
+            {/* IntersectionShell renders the shared header + tabs spine.
+                Story is the default landing tab so operators and panellists
+                land in the narrative, not in the engineering view. The old
+                Live-camera + warrant-chips page lives at /live as a drill-down. */}
+            <Route path="intersections/:id" element={<IntersectionShell />}>
+              <Route index               element={<IntersectionStoryPage />} />
+              <Route path="live"         element={<IntersectionDetailPage />} />
+              <Route path="timing"       element={<SignalTimingPage />} />
+              <Route path="report"       element={<IntersectionReportPage />} />
+            </Route>
             <Route path="intersections/:intersectionId/cameras/:id" element={<CameraDetailPage />} />
             <Route path="videos"     element={<VideosPage />} />
             <Route path="videos/:id" element={<VideosPage />} />

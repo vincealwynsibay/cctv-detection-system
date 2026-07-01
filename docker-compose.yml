@@ -97,6 +97,11 @@ services:
       # analysis automatically every hour. Dev stacks should leave this at 0
       # to avoid background writes clobbering manually-set test data.
       ANALYSIS_INTERVAL_MINUTES: ${ANALYSIS_INTERVAL_MINUTES:-0}
+      # Path to the temporal warrant CNN checkpoint inside the container.
+      # Defaults to the synthetic baseline (server/ml/temporal_cnn_model.pt).
+      # Set to the real-trained Toronto checkpoint to flip the badge to
+      # "Real-trained CNN" and use the post-sprint model in production.
+      TEMPORAL_CNN_MODEL_PATH: ${TEMPORAL_CNN_MODEL_PATH:-/app/runs/real_cnn/real_cnn_seed0.pt}
     command: uvicorn server.main:app --host 0.0.0.0 --port 8000
     ports:
       - "8000:8000"
@@ -104,6 +109,10 @@ services:
       - upload_data:/app/uploads
       - ./server:/app/server
       - ./common:/app/common
+      # runs/ carries trained checkpoints (real_cnn, temporal_cnn) plus the
+      # stochastic microsim output. Mounting it read-only is sufficient for
+      # serving inference, and avoids any accidental writes from the API.
+      - ./runs:/app/runs:ro
     depends_on:
       pgbouncer:
         condition: service_healthy

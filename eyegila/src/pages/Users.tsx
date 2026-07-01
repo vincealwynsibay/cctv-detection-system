@@ -110,8 +110,13 @@ export function UsersPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold tracking-tight">Users</h1>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-semibold tracking-tight">Users</h1>
+          <p className="text-sm text-muted-foreground mt-0.5 print:hidden">
+            Manage operator accounts and reset passwords.
+          </p>
+        </div>
         <Button size="sm" onClick={openCreate}>
           <Plus data-icon="inline-start" />
           Add User

@@ -49,15 +49,12 @@ async def aggregation_pusher():
             db.execute(text("SET LOCAL statement_timeout = '30s'"))
             # Per the consumer contract in eyegila/src/pages/Manual.tsx:
             #   "the latest 1-minute bucket counts per intersection and street"
-            # Two bounds intentional:
-            #   * time >= start-of-current-minute  – matches the bucket the
-            #     SELECT is stamping; without this we'd scan today's ~600k rows
-            #     every tick and time out.
-            #   * time <=  NOW()                   – the seeder injects ~7 days
-            #     of synthetic FUTURE-dated detections so warrant analyses can
-            #     still run on intersections whose live cameras don't have an
-            #     RTSP feed. Those rows must be excluded from the live view or
-            #     they pollute the row count (475k+ matches) and time out.
+            # Bounds: the half-open current-minute window
+            #   [start-of-current-minute, start-of-next-minute).
+            # The lower bound prevents scanning today's ~600k rows every tick.
+            # The upper bound caps to exactly one minute - without it, the
+            # seeder's future-dated rows (used for warrant analyses) would all
+            # match and explode the row count (475k+) into a statement timeout.
             rows = db.execute(text("""
                 SELECT
                     intersection_id,
@@ -69,7 +66,7 @@ async def aggregation_pusher():
                     COUNT(*)::int                                 AS count
                 FROM detection_street_view
                 WHERE time >= DATE_TRUNC('minute', NOW() AT TIME ZONE :tz) AT TIME ZONE :tz
-                  AND time <= NOW()
+                  AND time <  DATE_TRUNC('minute', NOW() AT TIME ZONE :tz) AT TIME ZONE :tz + INTERVAL '1 minute'
                 GROUP BY intersection_id, intersection_name, street_id, direction, object_type
                 ORDER BY intersection_id, street_id, direction, object_type
             """), {"tz": _TZ}).fetchall()

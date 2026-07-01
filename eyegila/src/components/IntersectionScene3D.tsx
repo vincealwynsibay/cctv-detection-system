@@ -609,7 +609,7 @@ const APP_ENTRY_XZ: [number, number][] = [
 //   p2  = Bezier end = box edge where vehicle enters the exit arm
 //   far = far end of exit arm (removal boundary)
 //
-// Right turns: control point at the NEAR outside BOX corner — tight inside
+// Right turns: control point at the NEAR outside BOX corner - tight inside
 // arc matches real geometry.
 //
 // Left turns: control point at the entry-aligned LANE intersection:
@@ -720,7 +720,6 @@ function buildHudHTML(vehicles: Veh[], sim: SimulationChunk | null | undefined, 
   if (sim) {
     const saved   = sim.delay_before - sim.delay_after;
     const pctSave = sim.delay_before > 0 ? (saved / sim.delay_before) * 100 : 0;
-    const phpSave = Math.round(sim.vehicle_hours_saved * 65);
 
     if (!showBefore) {
       html += `<div style="${card}">
@@ -733,7 +732,7 @@ function buildHudHTML(vehicles: Veh[], sim: SimulationChunk | null | undefined, 
           <span style="font-size:14px;font-weight:600;color:#10b981">${sim.delay_after.toFixed(1)}s</span>
           <span style="font-size:11px;font-weight:600;color:#34d399">−${saved.toFixed(1)}s (${pctSave.toFixed(0)}%)</span>
         </div>
-        <div style="margin-top:4px;font-size:11px;color:#34d399">₱${phpSave.toLocaleString()} saved/hr · ${sim.vehicle_hours_saved.toFixed(1)} veh-hr</div>
+        <div style="margin-top:4px;font-size:11px;color:#34d399">${sim.vehicle_hours_saved.toFixed(1)} veh-hr saved</div>
       </div>`;
     } else {
       html += `<div style="${card}">
@@ -783,6 +782,26 @@ export function IntersectionScene3D({
   useEffect(() => { speedRef.current   = speed;      }, [speed]);
   useEffect(() => { volumeRef.current  = volumePcuHr; }, [volumePcuHr]);
   useEffect(() => { typeMixRef.current = typeMix;    }, [typeMix]);
+
+  // Real per-second arrival schedule (only set by on-demand window endpoint).
+  // When populated, update() spawns vehicles from this schedule instead of
+  // resampling Poisson from `volumePcuHr`.
+  const arrivalsByAppRef  = useRef<(number[] | undefined)[]>([undefined, undefined, undefined, undefined]);
+  const arrivalCarryRef   = useRef<number[]>([0, 0, 0, 0]);
+  const lastArrivalSecRef = useRef<number>(-1);
+  useEffect(() => {
+    const arr = sim?.arrivals_per_second ?? null;
+    const byApp: (number[] | undefined)[] = [undefined, undefined, undefined, undefined];
+    if (arr) {
+      for (const s of streets) {
+        const ai = DIR_TO_APP[s.arm_direction];
+        if (ai !== undefined) byApp[ai] = arr[String(s.id)];
+      }
+    }
+    arrivalsByAppRef.current  = byApp;
+    arrivalCarryRef.current   = [0, 0, 0, 0];
+    lastArrivalSecRef.current = -1;
+  }, [sim, streets]);
 
   // ── Audio ─────────────────────────────────────────────────────────────
   // Synthesized via Web Audio so no external MP3 assets are required.
@@ -1338,12 +1357,33 @@ export function IntersectionScene3D({
           setTLPhase(tls[ai], phase, effectiveSignalOff && !blinkOn, rem);
         }
 
-        // Vehicle spawning
-        for (let app = 0; app < 4; app++) {
-          nextSpawn[app] -= dt;
-          if (nextSpawn[app] <= 0) {
-            if (vehicles.filter(v => v.app === app).length < 25) spawnVehicle(app);
-            nextSpawn[app] = nextPoissonInterval(perApproachVolume / 3600);
+        // Vehicle spawning - real schedule when available, Poisson otherwise.
+        const arrByApp = arrivalsByAppRef.current;
+        const hasSchedule = arrByApp.some(a => a && a.length > 0);
+        if (hasSchedule) {
+          const curSec = Math.floor(simTime);
+          while (lastArrivalSecRef.current < curSec) {
+            lastArrivalSecRef.current += 1;
+            for (let i = 0; i < 4; i++) {
+              const arr = arrByApp[i];
+              if (!arr || arr.length === 0) continue;
+              arrivalCarryRef.current[i] += arr[lastArrivalSecRef.current % arr.length] ?? 0;
+            }
+          }
+          for (let app = 0; app < 4; app++) {
+            while (arrivalCarryRef.current[app] >= 1) {
+              if (vehicles.filter(v => v.app === app).length >= 25) break;
+              spawnVehicle(app);
+              arrivalCarryRef.current[app] -= 1;
+            }
+          }
+        } else {
+          for (let app = 0; app < 4; app++) {
+            nextSpawn[app] -= dt;
+            if (nextSpawn[app] <= 0) {
+              if (vehicles.filter(v => v.app === app).length < 25) spawnVehicle(app);
+              nextSpawn[app] = nextPoissonInterval(perApproachVolume / 3600);
+            }
           }
         }
 
@@ -1485,7 +1525,7 @@ export function IntersectionScene3D({
 
             // Pedestrian gate: peds start crossing only when the conflicting
             // vehicle phase is red (pedCanWalkAt), but they don't disappear
-            // the instant the phase flips back to green — slow walkers can
+            // the instant the phase flips back to green - slow walkers can
             // still be mid-crossing. Without this check the first vehicles
             // of a new green plough straight through them. The mapping
             // mirrors CW_DEFS.blockedApp: NS approaches (SB/NB = app 0,2)

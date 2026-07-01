@@ -26,7 +26,9 @@ import {
   CheckCircle2, Camera,
 } from 'lucide-react';
 import { statusBucket, BUCKET_LABEL, BUCKET_BADGE_CLASS } from '@/components/recommendations/statusBucket';
+import { JargonTip } from '@/components/JargonTip';
 import { cn } from '@/lib/utils';
+import { deriveIntersectionAction, MONITOR_THRESHOLD_VH } from '@/lib/intersectionAction';
 
 // ── Time-of-day chunks (mirror server/tod.py TOD_DEFAULTS) ───────────────────
 
@@ -507,11 +509,12 @@ function CamerasCard({ cameras }: { cameras: CCTV[] }) {
 
 type InterventionKind = 'signalize' | 'road_widening' | 'timing_only';
 
-// Three lanes separate "I can act today" from "I escalate" from "watch list":
-//   deploy   → timing change valid in the current TOD chunk, push to controller
+// Two lanes — the previous third ("Later today" for future-TOD-chunk timing
+// recs) doubled the mental model without giving operators any decision they
+// couldn't make from the chunkLabel pill on the row.
+//   deploy   → timing change to push to the controller (current or future chunk)
 //   escalate → signal install or widening, weeks/months out, route to engineering
-//   later    → timing change for a future TOD chunk today
-type ActionLane = 'deploy' | 'escalate' | 'later';
+type ActionLane = 'deploy' | 'escalate';
 
 type ActionItem = {
   inter: Intersection;
@@ -555,31 +558,120 @@ function provenanceTitle(rec: RecommendationResponse): string {
   return parts.join(' · ');
 }
 
-// Single small color cue per row (Linear/Datadog-style). Used only for the
-// status dot - keep the rest of the row monochrome so typography hierarchy
-// reads as the primary signal, not color.
-const KIND_DOT: Record<InterventionKind, string> = {
-  road_widening: 'bg-red-500',     // most urgent: structural fix
-  signalize:     'bg-amber-500',   // medium: install a signal
-  timing_only:   'bg-sky-500',     // light: parameter tune
+// One colored chip per kind replaces the previous separate dot + label combo.
+// Same colour family as before (red urgent, amber medium, sky light) so the
+// existing operator visual recall carries over.
+const KIND_CHIP: Record<InterventionKind, { label: string; className: string }> = {
+  road_widening: {
+    label: 'Widen',
+    className: 'bg-red-100 text-red-700 dark:bg-red-950/40 dark:text-red-300',
+  },
+  signalize: {
+    label: 'Signalize',
+    className: 'bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300',
+  },
+  timing_only: {
+    label: 'Adjust',
+    className: 'bg-sky-100 text-sky-700 dark:bg-sky-950/40 dark:text-sky-300',
+  },
 };
 
-const KIND_LABEL: Record<InterventionKind, string> = {
-  road_widening: 'Widen',
-  signalize:     'Signalize',
-  timing_only:   'Adjust',
+/** Pick the highest-confidence warrant that's actually met, for the row badge. */
+function dominantWarrant(rec: RecommendationResponse): { label: string; conf: number } | null {
+  const candidates = [
+    { label: 'W1',     met: rec.warrant_1_met,    conf: rec.warrant_1_confidence ?? 0 },
+    { label: 'W2',     met: rec.warrant_2_met,    conf: rec.warrant_2_confidence ?? 0 },
+    { label: 'W4 ped', met: rec.warrant_4_met,    conf: rec.warrant_4_confidence ?? 0 },
+    { label: 'WL-1',   met: !!rec.w_local_1_met,  conf: rec.w_local_1_confidence ?? 0 },
+    { label: 'WL-2',   met: !!rec.w_local_2_met,  conf: rec.w_local_2_confidence ?? 0 },
+    { label: 'WL-3',   met: !!rec.w_local_3_met,  conf: rec.w_local_3_confidence ?? 0 },
+  ].filter(c => c.met);
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => b.conf - a.conf);
+  return { label: candidates[0].label, conf: candidates[0].conf };
+}
+
+/** One-line impact metric for the row's right-hand column. */
+function impactLabel(item: ActionItem): { text: string; tone: 'good' | 'warn' | 'muted'; title?: string } | null {
+  const vh = item.rec.webster_vh_saved_per_day;
+  if (item.kind === 'timing_only') {
+    if (vh == null) return null;
+    if (vh > 0) {
+      return {
+        text: `+${Math.round(vh).toLocaleString()} vh/day`,
+        tone: 'good',
+        title: `Webster projects ${vh.toFixed(1)} vehicle-hours saved per day vs current timing`,
+      };
+    }
+    return null; // negative vh on a timing rec is filtered upstream
+  }
+  if (item.kind === 'signalize') {
+    const w = dominantWarrant(item.rec);
+    if (!w) return null;
+    return {
+      text: `${w.label} ${Math.round(w.conf * 100)}%`,
+      tone: 'warn',
+      title: `${w.label} warrant met at ${Math.round(w.conf * 100)}% confidence`,
+    };
+  }
+  if (item.kind === 'road_widening') {
+    if (vh == null) return null;
+    // Positive vh on a widen row = retiming is a real interim mitigation while
+    // the structural fix is being scheduled. Surface it as a good-tone impact
+    // so the row tells the dual story (widen + retime) instead of looking like
+    // a single-action escalation.
+    if (vh >= MONITOR_THRESHOLD_VH) {
+      return {
+        text: `+${Math.round(vh).toLocaleString()} vh/day via retiming`,
+        tone: 'good',
+        title: `Widening is the long-term fix, but retiming the signal now recovers about ${vh.toFixed(1)} vh/day in the meantime`,
+      };
+    }
+    if (vh < 0) {
+      return {
+        text: `${Math.round(vh).toLocaleString()} vh/day`,
+        tone: 'warn',
+        title: `Webster projects ${vh.toFixed(1)} vh/day of unrecoverable delay; capacity exceeded`,
+      };
+    }
+    return null;
+  }
+  return null;
+}
+
+const IMPACT_TONE_CLASS: Record<'good' | 'warn' | 'muted', string> = {
+  good:  'text-emerald-700 dark:text-emerald-400',
+  warn:  'text-amber-700 dark:text-amber-400',
+  muted: 'text-muted-foreground',
 };
 
 function buildActionItem(
   inter: Intersection,
   rec: RecommendationResponse,
   currentChunkName: string,
-): ActionItem {
-  const signalized = inter.signal_status !== 'unsignalized';
-  // Prefer the backend's classified intervention; fall back to the signalize/
-  // timing-only inference for older rows that pre-date the field.
-  const kind: InterventionKind = rec.intervention?.class
-    ?? (signalized ? 'timing_only' : 'signalize');
+): ActionItem | null {
+  // Reconcile MUTCD + Webster's via the shared helper. `webster_vh_saved_per_day`
+  // ships on every rec via the list endpoint, so the dashboard doesn't need a
+  // per-intersection simulation fetch to decide whether a warrant-met signal
+  // is actually worth installing.
+  const action = deriveIntersectionAction(rec, inter);
+
+  // Non-actionable verdicts don't belong on the action card. 'monitor' is the
+  // case the user flagged: warrant tripped on one peak hour but Webster says
+  // adding a signal would make things worse - keep an eye on it as volumes
+  // grow, but don't tell engineering to schedule work today.
+  if (
+    action.kind === 'monitor' ||
+    action.kind === 'no_action' ||
+    action.kind === 'no_analysis'
+  ) {
+    return null;
+  }
+
+  const kind: InterventionKind =
+    action.kind === 'install_signal' ? 'signalize'     :
+    action.kind === 'widen_lanes'    ? 'road_widening' :
+                                       'timing_only';  // adjust_timing
 
   const totalVolume = (rec.major_volume ?? 0) + (rec.minor_volume ?? 0);
   // Severity ranks rows that are both confident and high-impact ahead of
@@ -587,28 +679,28 @@ function buildActionItem(
   // missing so older recs don't sink to the bottom.
   const severity = (rec.recommended_confidence ?? 0) * (totalVolume || 1);
 
-  if (kind === 'signalize') {
-    return { inter, rec, verb: 'Install signal', chunkLabel: null, lane: 'escalate', kind, severity };
+  if (action.kind === 'adjust_timing') {
+    // All timing recs land in the deploy lane. Future-chunk recs surface a
+    // chunk-name pill on the row so operators can see at a glance that this
+    // applies later in the day; that's enough context — no need for a
+    // separate "Later today" lane.
+    const chunk = rec.timing_chunk;
+    const sameChunk = chunk == null || chunk === currentChunkName;
+    return {
+      inter, rec,
+      verb: action.headline,
+      chunkLabel: sameChunk ? null : chunk,
+      lane: 'deploy', kind, severity,
+    };
   }
-  if (kind === 'road_widening') {
-    return { inter, rec, verb: 'Add capacity (widen)', chunkLabel: null, lane: 'escalate', kind, severity };
-  }
-  const chunk = rec.timing_chunk;
-  const cycle = rec.timing_cycle;
-  const verb = cycle != null
-    ? `Adjust timing to ${cycle}s cycle`
-    : 'Timing adjustment recommended';
-  if (chunk == null || chunk === currentChunkName) {
-    return { inter, rec, verb, chunkLabel: chunk, lane: 'deploy', kind, severity };
-  }
-  return { inter, rec, verb, chunkLabel: chunk, lane: 'later', kind, severity };
+
+  // install_signal / widen_lanes both escalate.
+  return { inter, rec, verb: action.headline, chunkLabel: null, lane: 'escalate', kind, severity };
 }
 
 function NeedsActionBigRow({ item, nowMs }: { item: ActionItem; nowMs: number }) {
-  const pct = item.rec.recommended_confidence != null
-    ? Math.round(item.rec.recommended_confidence * 100)
-    : null;
-  const detail = item.chunkLabel ? `${item.verb} · ${item.chunkLabel}` : item.verb;
+  const chip = KIND_CHIP[item.kind];
+  const impact = impactLabel(item);
   const since = formatSince(item.rec.generated_at, nowMs);
   return (
     <Link
@@ -616,18 +708,35 @@ function NeedsActionBigRow({ item, nowMs }: { item: ActionItem; nowMs: number })
       data-testid="needs-action-row"
       className="group flex items-center gap-3 rounded-md px-2 -mx-2 py-2 hover:bg-muted/50 transition-colors"
     >
-      <span className={cn('size-2 rounded-full shrink-0', KIND_DOT[item.kind])} aria-hidden />
+      {/* Single colored chip replaces the previous dot + separate label combo.
+          `w-20 justify-center` gives every chip the same footprint so the row
+          starts (intersection name, chunk pill, since-text) align across rows
+          regardless of which verb the chip carries (Widen/Adjust/Signalize). */}
+      <span
+        className={cn(
+          'inline-flex items-center justify-center w-20 px-1.5 py-0.5 rounded text-[10px] font-semibold tracking-wide uppercase shrink-0',
+          chip.className,
+        )}
+        title={provenanceTitle(item.rec)}
+      >
+        {chip.label}
+      </span>
       <div className="flex-1 min-w-0">
-        <div className="flex items-baseline gap-2">
+        <div className="flex items-baseline gap-2 min-w-0">
           <p className="text-sm font-semibold leading-tight truncate text-foreground">
             {item.inter.name}
           </p>
-          <span className="text-[10px] uppercase tracking-wide text-muted-foreground/80 font-medium shrink-0">
-            {KIND_LABEL[item.kind]}
-          </span>
+          {item.chunkLabel && (
+            <span
+              className="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground font-medium shrink-0"
+              title={`Recommendation applies during the ${item.chunkLabel} period`}
+            >
+              {item.chunkLabel}
+            </span>
+          )}
         </div>
         <p className="text-xs text-muted-foreground truncate mt-0.5">
-          {detail}
+          {item.verb}
         </p>
       </div>
       {since && (
@@ -638,52 +747,15 @@ function NeedsActionBigRow({ item, nowMs }: { item: ActionItem; nowMs: number })
           {since}
         </span>
       )}
-      {pct != null && (
+      {impact && (
         <span
-          className="text-sm font-semibold tabular-nums text-foreground/80 w-12 text-right shrink-0"
-          title={provenanceTitle(item.rec)}
+          className={cn('text-xs font-semibold tabular-nums tracking-tight shrink-0 text-right min-w-[80px]', IMPACT_TONE_CLASS[impact.tone])}
+          title={impact.title}
         >
-          {pct}%
+          {impact.text}
         </span>
       )}
       <ArrowRight className="size-4 text-muted-foreground/60 group-hover:text-foreground transition-colors shrink-0" />
-    </Link>
-  );
-}
-
-function NeedsActionCompactRow({ item, nowMs }: { item: ActionItem; nowMs: number }) {
-  const pct = item.rec.recommended_confidence != null
-    ? Math.round(item.rec.recommended_confidence * 100)
-    : null;
-  const since = formatSince(item.rec.generated_at, nowMs);
-  return (
-    <Link
-      to={`/intersections/${item.inter.id}`}
-      className="group flex items-center gap-2 rounded-md px-2 -mx-2 py-1.5 text-xs hover:bg-muted/50 transition-colors"
-    >
-      <span className={cn('size-1.5 rounded-full shrink-0', KIND_DOT[item.kind])} aria-hidden />
-      <span className="flex-1 font-medium truncate text-foreground/90">{item.inter.name}</span>
-      <span className="text-muted-foreground truncate hidden sm:inline">{item.verb}</span>
-      {item.chunkLabel && (
-        <span className="text-[10px] text-muted-foreground/70 shrink-0 hidden md:inline">{item.chunkLabel}</span>
-      )}
-      {since && (
-        <span
-          className="text-[10px] tabular-nums text-muted-foreground/70 shrink-0 hidden md:inline"
-          title={`Warranted since ${new Date(item.rec.generated_at).toLocaleString()}`}
-        >
-          {since}
-        </span>
-      )}
-      {pct != null && (
-        <span
-          className="font-mono tabular-nums text-muted-foreground/80 w-9 text-right"
-          title={provenanceTitle(item.rec)}
-        >
-          {pct}%
-        </span>
-      )}
-      <ArrowRight className="size-3 text-muted-foreground/50 group-hover:text-foreground transition-colors shrink-0" />
     </Link>
   );
 }
@@ -697,33 +769,35 @@ function NeedsActionCard({
 }: {
   deploy: ActionItem[];
   escalate: ActionItem[];
-  later: ActionItem[];
   currentChunkName: string;
   nowMs: number;
 }) {
   const DEPLOY_LIMIT = 6;
   const ESCALATE_LIMIT = 4;
-  const LATER_LIMIT = 6;
-  const deployDisplayed = deploy.slice(0, DEPLOY_LIMIT);
+  // Per-section expanded state so each lane can be opened independently. The
+  // "+N more" pill below toggles this; collapsed by default to keep the card
+  // compact for wall-display use.
+  const [deployExpanded,   setDeployExpanded]   = useState(false);
+  const [escalateExpanded, setEscalateExpanded] = useState(false);
+  const deployDisplayed = deployExpanded ? deploy : deploy.slice(0, DEPLOY_LIMIT);
   const deployOverflow = Math.max(0, deploy.length - DEPLOY_LIMIT);
-  const escalateDisplayed = escalate.slice(0, ESCALATE_LIMIT);
+  const escalateDisplayed = escalateExpanded ? escalate : escalate.slice(0, ESCALATE_LIMIT);
   const escalateOverflow = Math.max(0, escalate.length - ESCALATE_LIMIT);
-  const laterDisplayed = later.slice(0, LATER_LIMIT);
-  const laterOverflow = Math.max(0, later.length - LATER_LIMIT);
-  const total = deploy.length + escalate.length + later.length;
+  const total = deploy.length + escalate.length;
 
   return (
     <Card data-testid="needs-action-card" className="h-full w-full">
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-baseline gap-2">
-            <CardTitle className="text-base font-semibold tracking-tight">
-              Needs action
+            <CardTitle className="text-base font-semibold tracking-tight inline-flex items-center gap-1">
+              Needs action <JargonTip term="recommendation" />
             </CardTitle>
             <span className="text-sm text-muted-foreground tabular-nums">{total}</span>
           </div>
-          <span className="text-[11px] uppercase tracking-wide text-muted-foreground">
+          <span className="text-[11px] uppercase tracking-wide text-muted-foreground inline-flex items-center gap-1">
             during <span className="text-foreground font-medium">{currentChunkName}</span>
+            <JargonTip term="tod_chunk" />
           </span>
         </div>
       </CardHeader>
@@ -745,9 +819,13 @@ function NeedsActionCard({
                 <NeedsActionBigRow key={item.inter.id} item={item} nowMs={nowMs} />
               ))}
               {deployOverflow > 0 && (
-                <p className="text-[11px] text-muted-foreground px-1">
-                  + {deployOverflow} more - see intersection list
-                </p>
+                <button
+                  type="button"
+                  onClick={() => setDeployExpanded(v => !v)}
+                  className="self-start text-[11px] text-muted-foreground hover:text-foreground px-1 py-0.5 underline underline-offset-2 decoration-dotted"
+                >
+                  {deployExpanded ? `Show fewer (top ${DEPLOY_LIMIT})` : `+ ${deployOverflow} more`}
+                </button>
               )}
             </div>
           )}
@@ -766,31 +844,18 @@ function NeedsActionCard({
                 <NeedsActionBigRow key={item.inter.id} item={item} nowMs={nowMs} />
               ))}
               {escalateOverflow > 0 && (
-                <p className="text-[11px] text-muted-foreground px-1">
-                  + {escalateOverflow} more
-                </p>
+                <button
+                  type="button"
+                  onClick={() => setEscalateExpanded(v => !v)}
+                  className="self-start text-[11px] text-muted-foreground hover:text-foreground px-1 py-0.5 underline underline-offset-2 decoration-dotted"
+                >
+                  {escalateExpanded ? `Show fewer (top ${ESCALATE_LIMIT})` : `+ ${escalateOverflow} more`}
+                </button>
               )}
             </div>
           </section>
         )}
 
-        {(laterDisplayed.length > 0 || laterOverflow > 0) && (
-          <section data-testid="needs-action-later" className="flex flex-col gap-2 pt-3 border-t border-border/60">
-            <h3 className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-              Later today
-            </h3>
-            <div className="flex flex-col gap-1">
-              {laterDisplayed.map(item => (
-                <NeedsActionCompactRow key={item.inter.id} item={item} nowMs={nowMs} />
-              ))}
-              {laterOverflow > 0 && (
-                <p className="text-[11px] text-muted-foreground px-1">
-                  + {laterOverflow} more
-                </p>
-              )}
-            </div>
-          </section>
-        )}
       </CardContent>
     </Card>
   );
@@ -1001,19 +1066,26 @@ export function IntersectionsPage() {
     return m;
   }, [sseData]);
 
-  const { deployActions, escalateActions, laterActions, warrantedTotal } = useMemo(() => {
+  const { deployActions, escalateActions, warrantedTotal } = useMemo(() => {
     const all: ActionItem[] = [];
     for (const inter of intersections) {
       const rec = recs.get(inter.id);
-      if (!rec || !rec.recommended) continue;
-      all.push(buildActionItem(inter, rec, currentChunk.name));
+      if (!rec) continue;
+      // No `!rec.recommended` guard here: `_analyze` sets `recommended` to
+      // `intervention != 'timing_only'`, which silently hid every signalized
+      // intersection where the CNN's verdict was "tweak timing" - including
+      // legitimate "Adjust timing" and signalized "Widen" cases. The shared
+      // helper + buildActionItem already filter out non-actionable verdicts
+      // (no_action / monitor / no_analysis) downstream, so they're now the
+      // gatekeepers.
+      const item = buildActionItem(inter, rec, currentChunk.name);
+      if (item) all.push(item);
     }
     // Sort by severity (confidence × volume) so high-impact rows lead.
     const bySeverity = (a: ActionItem, b: ActionItem) => b.severity - a.severity;
     return {
       deployActions:   all.filter(a => a.lane === 'deploy').sort(bySeverity),
       escalateActions: all.filter(a => a.lane === 'escalate').sort(bySeverity),
-      laterActions:    all.filter(a => a.lane === 'later').sort(bySeverity),
       warrantedTotal:  all.length,
     };
   }, [intersections, recs, currentChunk.name]);
@@ -1034,10 +1106,33 @@ export function IntersectionsPage() {
     setGeneratingAll(true);
     try {
       const results = await recommendationsApi.generateAll();
-      setRecs(new Map(results.map(r => [r.intersection_id, r])));
+      // Merge instead of replace: run_generate_all silently rolls back any
+      // intersection that throws (per-intersection try/except on the backend)
+      // and excludes it from the response. Replacing the Map would make those
+      // rows blink off the dashboard until the next successful run; merging
+      // keeps the last-known-good rec visible.
+      setRecs(prev => {
+        const next = new Map(prev);
+        for (const r of results) next.set(r.intersection_id, r);
+        return next;
+      });
       setLastAnalysedAt(new Date());
-      const warranted = results.filter(r => r.recommended).length;
-      toast.success(`Analysis complete - ${warranted} warranted`);
+      // Count what the user will actually *see* on the action card, not the
+      // raw rec.recommended flag (which can be true with no individual warrant
+      // met). Mirror buildActionItem's null filter so "N actionable" matches
+      // the card row count.
+      const interById = new Map(intersections.map(i => [i.id, i]));
+      const NON_ACTIONABLE = new Set(['monitor', 'no_action', 'no_analysis']);
+      const actionable = results.filter(r => {
+        const inter = interById.get(r.intersection_id) ?? null;
+        const a = deriveIntersectionAction(r, inter);
+        return !NON_ACTIONABLE.has(a.kind);
+      }).length;
+      toast.success(
+        actionable === 0
+          ? 'Analysis complete - nothing to act on'
+          : `Analysis complete - ${actionable} actionable`,
+      );
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : 'Analysis failed');
     } finally {
@@ -1116,7 +1211,14 @@ export function IntersectionsPage() {
       pollInFlight.current = true;
       try {
         const results = await recommendationsApi.generateAll();
-        setRecs(new Map(results.map(r => [r.intersection_id, r])));
+        // Merge (not replace) so an intersection that fails this poll keeps
+        // its last-known-good rec on screen instead of vanishing. See
+        // runAllAnalyses above for the rationale.
+        setRecs(prev => {
+          const next = new Map(prev);
+          for (const r of results) next.set(r.intersection_id, r);
+          return next;
+        });
         setLastAnalysedAt(new Date());
       } catch {
         // silent on the wall display; errors don't take focus
@@ -1133,6 +1235,9 @@ export function IntersectionsPage() {
 
   return (
     <div className="flex flex-col gap-3">
+      <p className="text-sm text-muted-foreground print:hidden">
+        Live intersection health, warrant verdicts, and pending setup tasks.
+      </p>
       <DashboardStrip
         intersectionCount={intersections.length}
         chunkName={currentChunk.name}
@@ -1186,7 +1291,6 @@ export function IntersectionsPage() {
               <NeedsActionCard
                 deploy={deployActions}
                 escalate={escalateActions}
-                later={laterActions}
                 currentChunkName={currentChunk.name}
                 nowMs={now.getTime()}
               />

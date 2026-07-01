@@ -8,13 +8,22 @@ from tests.conftest import API_URL
 # ── Unit tests ───────────────────────────────────────────────────────────────
 
 def test_uniform_delay_typical():
-    """Webster's uniform delay produces a plausible value for a typical input."""
+    """Webster's uniform delay produces a plausible value for a typical input.
+
+    Range tightened on 2026-06-30 after a validation-driven fix to
+    `compute_uniform_delay` (the denominator used (1-x) instead of (1-λ·x);
+    closed-form expected values are now exercised in
+    `tests/test_simulation_validation.py`).
+    """
     from server.simulation import compute_uniform_delay
 
-    # C=90s, g=30s, q=400 PCU/hr, S=1400
-    # x = 400*90/(1400*30) = 0.857  →  d = 90*(0.667)^2 / (2*0.143) ≈ 140s
+    # C=90s, g=30s (λ=1/3), q=400 PCU/hr, s=1400
+    # cap = 1400 * 0.333 = 466.7,  x = 400/466.7 = 0.857
+    # d = 90 * (1-0.333)² / (2 * (1 - 0.333 * 0.857))
+    #   = 90 * 0.444 / (2 * 0.714)
+    #   ≈ 28.0 s/veh   (HCM Level of Service C territory)
     d = compute_uniform_delay(C=90, g=30, q_pcu_hr=400)
-    assert 30 < d < 300
+    assert 25 < d < 35
 
 
 def test_uniform_delay_zero_flow():

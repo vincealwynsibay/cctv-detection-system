@@ -1,5 +1,5 @@
 import { request } from './api';
-import type { Intersection, SignalStatus } from '../types';
+import type { Intersection, OnboardingTask, SignalStatus } from '../types';
 
 export interface SignalTimingPayload {
   signal_status: SignalStatus;
@@ -57,4 +57,16 @@ export const intersectionsApi = {
 
   detectTiming: (id: number) =>
     request<DetectTimingResult>(`/intersections/${id}/detect-timing`),
+
+  dismissSetupTask: (id: number, task: OnboardingTask) =>
+    request<Intersection>(`/intersections/${id}/dismiss-setup-task`, {
+      method: 'POST',
+      body: JSON.stringify({ task }),
+    }),
+
+  restoreSetupTask: (id: number, task: OnboardingTask) =>
+    request<Intersection>(`/intersections/${id}/restore-setup-task`, {
+      method: 'POST',
+      body: JSON.stringify({ task }),
+    }),
 };

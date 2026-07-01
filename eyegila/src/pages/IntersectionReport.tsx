@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams } from 'react-router-dom';
 import { intersectionsApi } from '@/services/intersections';
 import { streetsApi } from '@/services/streets';
 import { recommendationsApi, type RecommendationResponse } from '@/services/recommendations';
@@ -8,14 +8,12 @@ import { selectPeakChunk } from '@/lib/simulation';
 import { timingApi, type TimingChunk } from '@/services/timing';
 import type { Intersection, Street } from '@/types';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
-import { ArrowLeft, Printer } from 'lucide-react';
-import { LoadingRobot } from '@/components/LoadingRobot';
+import { Loader2, Printer } from 'lucide-react';
 import { IntersectionSummary } from '@/components/IntersectionSummary';
-import { IntersectionTabs } from '@/components/IntersectionTabs';
+import { ConfidenceBadge } from '@/components/ConfidenceBadge';
 import { ARM_SHORT, GanttDiagram, LosBadge } from '@/components/signal-timing-viz';
 import {
-  statusBucket, BUCKET_LABEL, BUCKET_BADGE_CLASS,
+  statusBucket, BUCKET_LABEL,
 } from '@/components/recommendations/statusBucket';
 import { cn } from '@/lib/utils';
 
@@ -26,7 +24,6 @@ function fmt(n: number | null | undefined, unit = 's'): string {
 
 export function IntersectionReportPage() {
   const { id } = useParams<{ id: string }>();
-  const navigate = useNavigate();
   const interId = Number(id);
 
   const [intersection, setIntersection] = useState<Intersection | null>(null);
@@ -64,8 +61,9 @@ export function IntersectionReportPage() {
 
   if (loading) {
     return (
-      <div className="flex justify-center py-16">
-        <LoadingRobot message="Loading report..." />
+      <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted-foreground">
+        <Loader2 className="size-4 animate-spin" />
+        Loading report…
       </div>
     );
   }
@@ -98,30 +96,13 @@ export function IntersectionReportPage() {
 
   return (
     <div className="flex flex-col gap-5 print:gap-2">
-      {/* Header */}
-      <div className="flex items-center gap-3 print:hidden flex-wrap">
-        <Button variant="ghost" size="icon" className="size-8" onClick={() => navigate(-1)}>
-          <ArrowLeft className="size-4" />
-        </Button>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <h1 className="text-xl font-semibold tracking-tight truncate">{intersection.name}</h1>
-            {bucket && (
-              <Badge variant="outline" className={cn('text-[10px]', BUCKET_BADGE_CLASS[bucket])}>
-                {BUCKET_LABEL[bucket]}
-              </Badge>
-            )}
-            <Badge variant="secondary" className="text-[10px]">
-              {intersection.signal_status.replace('_', ' ')}
-            </Badge>
-          </div>
-          <p className="text-xs text-muted-foreground mt-0.5">Intersection report</p>
-        </div>
+      {/* Tab-local action row - shell already shows Back/title/Analyse/Settings.
+          Only Print is tab-specific. */}
+      <div className="flex items-center justify-end gap-2 print:hidden">
         <Button variant="outline" size="sm" onClick={() => window.print()}>
           <Printer className="size-3.5 mr-1.5" />
           Print / Export PDF
         </Button>
-        {id && <IntersectionTabs intersectionId={id} />}
       </div>
 
       {/* Print-only header */}
@@ -134,9 +115,11 @@ export function IntersectionReportPage() {
         </p>
       </div>
 
-      {/* Key stats - 4 cards */}
+      {/* Key stats - the 3 numbers an operator needs to decide.
+          Total flow (PCU/hr) was cut: it's engineering jargon and the
+          plain veh/hr Major/Minor volume in Findings carries the same info. */}
       {ds && (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <div className="rounded-lg border border-border bg-card p-4 print:p-3">
             <p className="text-xs text-muted-foreground">Avg delay before</p>
             <p className="text-xl font-semibold mt-1">{fmt(ds.avg_delay_before)}</p>
@@ -160,12 +143,14 @@ export function IntersectionReportPage() {
             </p>
             <p className="text-xs text-muted-foreground mt-1">per day</p>
           </div>
-          <div className="rounded-lg border border-border bg-card p-4 print:p-3">
-            <p className="text-xs text-muted-foreground">Total flow</p>
-            <p className="text-xl font-semibold mt-1">{ds.total_volume_pcu_hr.toFixed(0)}</p>
-            <p className="text-xs text-muted-foreground mt-1">PCU/hr across all periods</p>
-          </div>
         </div>
+      )}
+
+      {/* Stochastic confidence (Monte Carlo) — peak-chunk CI on vh saved.
+          Lazy fetch, Redis-cached server-side; full width to give the
+          plain-English sentence room to breathe. */}
+      {ds && ds.total_vehicle_hours_saved > 0 && (
+        <ConfidenceBadge intersectionId={interId} variant="card" />
       )}
 
       {/* Phase comparison - current vs recommended */}
@@ -195,12 +180,13 @@ export function IntersectionReportPage() {
         </div>
       )}
 
-      {/* Per-approach action card + narrative summary */}
+      {/* Findings + Recommendations/Conclusion - decomposed for the printed report */}
       <IntersectionSummary
         intersection={intersection}
         streets={streets}
         sim={sim}
         rec={rec}
+        variant="decomposed"
       />
     </div>
   );

@@ -4,6 +4,7 @@ import { MapContainer, TileLayer, Marker, useMapEvents } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { toast } from 'sonner';
+import { JargonTip } from '@/components/JargonTip';
 import { onboardingApi } from '@/services/onboarding';
 import { cctvsApi } from '@/services/cctvs';
 import { intersectionsApi } from '@/services/intersections';
@@ -45,12 +46,76 @@ const DEFAULT_DIR_ORDER: ArmDirection[] = ['northbound', 'southbound', 'eastboun
 const WIZARD_STEPS = [
   { id: 'welcome',    label: 'Preview'       },
   { id: 'discover',  label: 'Find cameras'  },
+  { id: 'group',     label: 'Group by IP'   },
   { id: 'name',      label: 'Name & pin'    },
   { id: 'assign',    label: 'Directions'    },
   { id: 'regions',   label: 'Draw regions'  },
   { id: 'timing',    label: 'Enter timing'  },
   { id: 'collecting',label: 'Collecting'    },
 ] as const;
+
+/** Last-octet of an IPv4 dotted-quad. Returns NaN for anything that
+ *  doesn't look like `a.b.c.d` - the group detector treats NaN as a
+ *  hard break in the contiguous-block scan. */
+function ipLastOctet(address: string): number {
+  const m = address.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  return m ? Number(m[4]) : NaN;
+}
+function ipSubnet24(address: string): string | null {
+  const m = address.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}$/);
+  return m ? m[1] : null;
+}
+
+interface IpGroup {
+  /** Stable id derived from the subnet + start octet - also serves as React key. */
+  key: string;
+  /** Pre-filled intersection name, editable inline. */
+  name: string;
+  /** Exactly 4 camera keys from `found` in IP-ascending order. */
+  cameraKeys: [string, string, string, string];
+}
+
+/** Detect contiguous /24 blocks of four cameras with strictly-incrementing
+ *  last octets (e.g. .31/.32/.33/.34). Any gap of 1+ resets the run so
+ *  malformed groups don't silently merge across a dead camera. */
+function detectIpGroups(found: { key: string; address: string }[]): IpGroup[] {
+  // Bucket by /24, sort each by last octet
+  const bySubnet = new Map<string, { key: string; octet: number }[]>();
+  for (const f of found) {
+    const sub = ipSubnet24(f.address);
+    const oct = ipLastOctet(f.address);
+    if (sub == null || Number.isNaN(oct)) continue;
+    if (!bySubnet.has(sub)) bySubnet.set(sub, []);
+    bySubnet.get(sub)!.push({ key: f.key, octet: oct });
+  }
+
+  const groups: IpGroup[] = [];
+  let groupIdx = 1;
+  for (const [subnet, entries] of bySubnet) {
+    entries.sort((a, b) => a.octet - b.octet);
+    let runStart = 0;
+    for (let i = 1; i <= entries.length; i++) {
+      const broken = i === entries.length || entries[i].octet !== entries[i - 1].octet + 1;
+      if (broken) {
+        const runLen = i - runStart;
+        // Emit every 4-IP chunk inside the run. Leftover tail (<4) stays ungrouped.
+        for (let s = runStart; s + 4 <= i; s += 4) {
+          const block = entries.slice(s, s + 4);
+          groups.push({
+            key: `${subnet}.${block[0].octet}`,
+            name: `Intersection ${groupIdx++}`,
+            cameraKeys: [block[0].key, block[1].key, block[2].key, block[3].key],
+          });
+        }
+        runStart = i;
+      }
+    }
+  }
+  return groups;
+}
+
+/** Direction pre-fill order - first IP gets N, then S, E, W. */
+const GROUP_DIRECTION_ORDER: ArmDirection[] = ['northbound', 'southbound', 'eastbound', 'westbound'];
 
 type WizardStepId = typeof WIZARD_STEPS[number]['id'];
 
@@ -94,6 +159,10 @@ export function OnboardingWizard({ open, initialStep, onClose }: OnboardingWizar
   // ── Discover step state ────────────────────────────────────────────────────
   const [found, setFound]         = useState<FoundCamera[]>([]);
   const [scanning, setScanning]   = useState(false);
+  // Rotating status text shown under the spinner while the simulated scan
+  // runs. Mirrors the phases of a real WS-Discovery sweep so the operator
+  // sees something happening instead of a static "Scanning…".
+  const [scanStatus, setScanStatus] = useState<string>('');
   const [nvrScanning, setNvrScanning] = useState(false);
   const [showNvr, setShowNvr]     = useState(false);
   const [nvrHost, setNvrHost]     = useState('');
@@ -101,6 +170,19 @@ export function OnboardingWizard({ open, initialStep, onClose }: OnboardingWizar
   const [nvrPass, setNvrPass]     = useState('');
   const [manualUrl, setManualUrl] = useState('');
   const [existingRtsp, setExistingRtsp] = useState<Set<string>>(new Set());
+  // When >=1 contiguous block of 4 is detected, default to bulk-group mode so
+  // a city operator with 60 ONVIF cameras doesn't slog through the wizard 15
+  // times. Cleared if they manually pick a smaller subset.
+  const [useBulkGroup, setUseBulkGroup] = useState(true);
+
+  // ── Group step state ──────────────────────────────────────────────────────
+  const [groups, setGroups] = useState<IpGroup[]>([]);
+
+  // When false (default), the regions step renders as a fullscreen wizard
+  // page so the operator can't miss the transition. They can opt to
+  // minimise into the floating corner panel to multitask (draw regions
+  // on the camera detail page while the panel tracks progress).
+  const [regionsMinimized, setRegionsMinimized] = useState(false);
 
   // ── Name step state ────────────────────────────────────────────────────────
   const [interName, setInterName] = useState('');
@@ -294,8 +376,28 @@ export function OnboardingWizard({ open, initialStep, onClose }: OnboardingWizar
 
   async function scanNetwork() {
     setScanning(true);
+    // Step through the phases of a WS-Discovery sweep so the operator can
+    // see what the system is doing during the ~2-second probe. Timed to
+    // match the server's simulated sleep - fall-through to "Found …" once
+    // the request resolves.
+    const phases = [
+      'Sweeping local network (192.168.1.0/24)…',
+      'Probing ONVIF endpoints on port 80…',
+      'Resolving RTSP stream URLs…',
+      'Aggregating results…',
+    ];
+    setScanStatus(phases[0]);
+    let phaseIdx = 0;
+    const phaseTimer = window.setInterval(() => {
+      phaseIdx = Math.min(phaseIdx + 1, phases.length - 1);
+      setScanStatus(phases[phaseIdx]);
+    }, 550);
     try {
-      const results = await cctvsApi.discover();
+      // Prototype path: ONVIF multicast can't reach anything off the LAN, so
+      // ask the server for a deterministic synthetic deployment instead.
+      // Already-imported RTSP URLs are filtered below so re-running the scan
+      // is idempotent against the existing test data.
+      const results = await cctvsApi.discover({ simulate: true });
       if (results.length === 0) {
         toast.info('No ONVIF cameras found on the network. Try NVR scan or add manually.');
       }
@@ -309,11 +411,18 @@ export function OnboardingWizard({ open, initialStep, onClose }: OnboardingWizar
             rtsp_url: r.rtsp_url ?? `rtsp://${r.address}:554/stream1`,
             selected: true,
           }));
+        if (fresh.length === 0 && results.length > 0) {
+          toast.info('All discovered cameras are already in the system.');
+        } else if (fresh.length > 0) {
+          toast.success(`Found ${fresh.length} new camera${fresh.length === 1 ? '' : 's'}`);
+        }
         return [...prev, ...fresh];
       });
     } catch {
       toast.error('Network scan failed');
     } finally {
+      window.clearInterval(phaseTimer);
+      setScanStatus('');
       setScanning(false);
     }
   }
@@ -412,6 +521,69 @@ export function OnboardingWizard({ open, initialStep, onClose }: OnboardingWizar
     }
   }
 
+  // ── Bulk group creation ────────────────────────────────────────────────────
+
+  async function createGroupsAndAdvance() {
+    setCreating(true);
+    const created: string[] = [];
+    const failed: string[] = [];
+    try {
+      // Sequential per-group to avoid clobbering each other; ~200ms per group
+      // × 15 groups = ~3s, acceptable for a prototype demo. Failures don't
+      // abort the loop - a single bad RTSP URL shouldn't lose the other 14
+      // intersections' worth of work.
+      for (const g of groups) {
+        try {
+          const cams = g.cameraKeys
+            .map(k => found.find(f => f.key === k))
+            .filter((c): c is FoundCamera => !!c);
+          if (cams.length !== 4) {
+            failed.push(g.name);
+            continue;
+          }
+          const inter = await intersectionsApi.create({
+            name:      g.name.trim() || 'Intersection',
+            latitude:  TAGUM_CENTER[0],
+            longitude: TAGUM_CENTER[1],
+          });
+          // One street per cardinal direction, one camera per street.
+          await Promise.all(
+            GROUP_DIRECTION_ORDER.map(dir =>
+              streetsApi.create({
+                intersection_id: inter.id,
+                name: dir.charAt(0).toUpperCase() + dir.slice(1).replace('bound', ''),
+                arm_direction: dir,
+              }),
+            ),
+          );
+          await Promise.all(
+            cams.map((c, i) =>
+              cctvsApi.create({
+                intersection_id: inter.id,
+                name: `${GROUP_DIRECTION_ORDER[i].replace('bound', '').toUpperCase()} camera`,
+                rtsp_url: c.rtsp_url,
+              }),
+            ),
+          );
+          created.push(g.name);
+        } catch {
+          failed.push(g.name);
+        }
+      }
+      if (failed.length > 0) {
+        toast.error(`Created ${created.length}/${groups.length} - ${failed.length} failed`);
+      } else {
+        toast.success(`Created ${created.length} intersections`);
+      }
+      // Skip Name/Assign/Regions/Timing entirely - the city operator
+      // prioritises regions and timing per-intersection from the sidebar
+      // Setup Progress popover on their own schedule.
+      await goTo('collecting');
+    } finally {
+      setCreating(false);
+    }
+  }
+
   // ── Step-aware Next handler ────────────────────────────────────────────────
 
   async function handleNext() {
@@ -420,7 +592,24 @@ export function OnboardingWizard({ open, initialStep, onClose }: OnboardingWizar
     if (stepId === 'discover') {
       const selected = found.filter(f => f.selected);
       if (selected.length === 0) { toast.error('Select at least one camera'); return; }
-      await goTo(nextStep);
+      // Bulk path: route to the Group step instead of Name, but only when the
+      // operator opted in AND the IP scan actually produced groupable cameras.
+      const selectedAddrs = new Set(selected.map(s => s.key));
+      const groupable = detectIpGroups(selected.map(s => ({ key: s.key, address: s.address })));
+      if (useBulkGroup && groupable.length > 0) {
+        // Filter groups so they only reference *selected* cameras (operator
+        // may have unticked a few).
+        const filtered = groupable.filter(g => g.cameraKeys.every(k => selectedAddrs.has(k)));
+        setGroups(filtered);
+        await goTo('group');
+        return;
+      }
+      await goTo('name');
+      return;
+    } else if (stepId === 'group') {
+      if (groups.length === 0) { toast.error('No groups to create'); return; }
+      await createGroupsAndAdvance();
+      return;
     } else if (stepId === 'name') {
       if (!interName.trim()) { toast.error('Enter an intersection name'); return; }
       // Prepare cameras array from selected found cameras
@@ -469,7 +658,10 @@ export function OnboardingWizard({ open, initialStep, onClose }: OnboardingWizar
   if (!open) return null;
 
   // ── Regions guide panel (compact floating overlay) ─────────────────────────
-  if (stepId === 'regions') {
+  // Only takes over the screen when the operator explicitly minimised it.
+  // Otherwise the regions step renders as a normal fullscreen wizard page
+  // (see the stepId === 'regions' block in the main return below).
+  if (stepId === 'regions' && regionsMinimized) {
     const allDone = regionCams.length > 0 && regionCams.every(c => c.hasRegions);
     return (
       <div className="fixed top-4 right-4 z-50 w-80 bg-card border border-border rounded-xl shadow-xl flex flex-col overflow-hidden">
@@ -542,9 +734,16 @@ export function OnboardingWizard({ open, initialStep, onClose }: OnboardingWizar
           )}
         </div>
 
-        {allDone && (
+        {allDone ? (
           <div className="mx-4 mb-3 rounded-lg bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-900 px-3 py-2 text-xs text-emerald-700 dark:text-emerald-400 font-medium">
             All cameras have regions - ready to continue!
+          </div>
+        ) : regionCams.length > 0 && (
+          // Advisory note - operators on high-priority intersections want to
+          // come back to regions later, not be blocked at this step.
+          <div className="mx-4 mb-3 rounded-lg bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+            {regionCams.filter(c => !c.hasRegions).length} of {regionCams.length} cameras don’t have regions yet -
+            counts from those will be ignored until you draw one. You can continue and finish later from the Cameras page.
           </div>
         )}
 
@@ -576,7 +775,7 @@ export function OnboardingWizard({ open, initialStep, onClose }: OnboardingWizar
           <Button
             size="sm"
             onClick={handleNext}
-            disabled={saving || regionLoading || !allDone}
+            disabled={saving || regionLoading}
             className="h-7 px-2.5 text-xs"
           >
             Next
@@ -610,11 +809,14 @@ export function OnboardingWizard({ open, initialStep, onClose }: OnboardingWizar
         </button>
       </div>
 
-      {/* Step indicators */}
+      {/* Step indicators.
+          'group' is hidden from the indicator unless the operator is actually
+          on the bulk track - single-intersection users shouldn't see a step
+          they will never visit. */}
       <div className="flex items-center justify-center gap-0.5 px-8 py-3 border-b border-border overflow-x-auto shrink-0">
-        {WIZARD_STEPS.map((step, idx) => {
+        {WIZARD_STEPS.filter(s => s.id !== 'group' || stepId === 'group' || stepId === 'collecting' && groups.length > 0).map((step, idx, visible) => {
           const isCurrent = step.id === stepId;
-          const isDone    = idx < stepIndex;
+          const isDone    = WIZARD_STEPS.findIndex(s => s.id === step.id) < stepIndex;
           return (
             <div key={step.id} className="flex items-center shrink-0">
               <div className={cn(
@@ -633,7 +835,7 @@ export function OnboardingWizard({ open, initialStep, onClose }: OnboardingWizar
                 </span>
                 <span className="hidden sm:inline">{step.label}</span>
               </div>
-              {idx < WIZARD_STEPS.length - 1 && (
+              {idx < visible.length - 1 && (
                 <div className={cn('h-px w-3 shrink-0', isDone ? 'bg-emerald-400/40' : 'bg-border')} />
               )}
             </div>
@@ -673,9 +875,10 @@ export function OnboardingWizard({ open, initialStep, onClose }: OnboardingWizar
             <div className="flex flex-col gap-6">
               <div>
                 <h2 className="text-2xl font-semibold">Find your cameras</h2>
-                <p className="text-muted-foreground mt-2">
-                  Scan the local network for ONVIF cameras, query an NVR/DVR, or add a camera
-                  by pasting its RTSP URL directly.
+                <p className="text-muted-foreground mt-2 inline-flex items-center gap-1 flex-wrap">
+                  Scan the local network for <span className="inline-flex items-center gap-0.5">ONVIF<JargonTip term="onvif" /></span>
+                  cameras, query an <span className="inline-flex items-center gap-0.5">NVR/DVR<JargonTip term="nvr" /></span>,
+                  or add a camera by pasting its <span className="inline-flex items-center gap-0.5">RTSP URL<JargonTip term="rtsp" /></span> directly.
                 </p>
               </div>
 
@@ -695,6 +898,12 @@ export function OnboardingWizard({ open, initialStep, onClose }: OnboardingWizar
                     : <ScanSearch className="size-4 mr-2" />}
                   {scanning ? 'Scanning network…' : 'Scan Network'}
                 </Button>
+                {scanning && (
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground font-mono">
+                    <span className="inline-block size-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                    {scanStatus}
+                  </div>
+                )}
               </div>
 
               {/* NVR scan toggle */}
@@ -812,10 +1021,115 @@ export function OnboardingWizard({ open, initialStep, onClose }: OnboardingWizar
                 </div>
               </div>
 
+              {/* Auto-group toggle - only meaningful when the scan returned
+                  enough cameras to form at least one block of 4 in IP order.
+                  Defaults on; the operator can turn it off for a single-
+                  intersection import. */}
+              {(() => {
+                const groupable = detectIpGroups(found.filter(f => f.selected).map(f => ({ key: f.key, address: f.address })));
+                if (groupable.length === 0) return null;
+                return (
+                  <label className="flex items-start gap-2 rounded-lg border border-primary/40 bg-primary/5 p-3 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={useBulkGroup}
+                      onChange={e => setUseBulkGroup(e.target.checked)}
+                      className="mt-0.5 accent-primary"
+                    />
+                    <div className="flex flex-col gap-0.5 text-xs">
+                      <span className="font-semibold">
+                        Auto-group by IP block of 4
+                      </span>
+                      <span className="text-muted-foreground">
+                        Selected cameras form {groupable.length} contiguous block{groupable.length === 1 ? '' : 's'} of 4 -
+                        we’ll create {groupable.length} intersection{groupable.length === 1 ? '' : 's'} in one step.
+                        Uncheck to import as a single intersection.
+                      </span>
+                    </div>
+                  </label>
+                );
+              })()}
+
               {selectedCount > 0 && (
                 <p className="text-xs text-muted-foreground">
                   {selectedCount} camera{selectedCount !== 1 ? 's' : ''} selected - click Next to continue.
                 </p>
+              )}
+            </div>
+          )}
+
+          {/* ── Group by IP ─────────────────────────────────────────────────── */}
+          {stepId === 'group' && (
+            <div className="flex flex-col gap-6">
+              <div>
+                <h2 className="text-2xl font-semibold">Confirm intersection groups</h2>
+                <p className="text-muted-foreground mt-2">
+                  We grouped your {found.filter(f => f.selected).length} cameras into{' '}
+                  <strong>{groups.length} intersections</strong> by IP block of four
+                  (e.g. .31/.32/.33/.34). Edit the names below if you like -
+                  directions are pre-filled N → S → E → W in IP order. Drawing detection
+                  regions and entering signal timing can be done afterwards from the
+                  sidebar Setup Progress popover.
+                </p>
+              </div>
+
+              <div className="rounded-lg border border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/20 p-3 text-xs text-amber-800 dark:text-amber-300">
+                Already-imported cameras were filtered out on scan, so re-running this
+                step is safe - only new groups will be created.
+              </div>
+
+              <div className="flex flex-col gap-3">
+                {groups.map((g, gi) => {
+                  const cams = g.cameraKeys
+                    .map(k => found.find(f => f.key === k))
+                    .filter((c): c is FoundCamera => !!c);
+                  return (
+                    <div key={g.key} className="rounded-lg border border-border bg-muted/20 p-4 flex flex-col gap-3">
+                      <div className="flex items-center gap-3">
+                        <span className="size-6 rounded-full bg-primary/15 text-primary text-xs font-bold flex items-center justify-center shrink-0">
+                          {gi + 1}
+                        </span>
+                        <Input
+                          value={g.name}
+                          onChange={e => setGroups(prev => prev.map((x, i) => i === gi ? { ...x, name: e.target.value } : x))}
+                          placeholder={`Intersection ${gi + 1}`}
+                          className="h-8 text-sm flex-1"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setGroups(prev => prev.filter((_, i) => i !== gi))}
+                          className="text-[11px] text-muted-foreground hover:text-destructive inline-flex items-center gap-1"
+                          title="Skip this group (cameras stay in scan)"
+                        >
+                          <X className="size-3" /> Skip
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                        {cams.map((c, i) => (
+                          <div key={c.key} className="rounded border border-border bg-background px-2 py-1.5 text-[11px]">
+                            <div className="font-mono text-foreground">{c.address}</div>
+                            <div className="text-muted-foreground uppercase tracking-wide text-[10px] mt-0.5">
+                              {GROUP_DIRECTION_ORDER[i].replace('bound', '')}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {groups.length === 0 && (
+                <p className="text-sm text-muted-foreground">
+                  No groups left to import. Click Back to revisit Discover.
+                </p>
+              )}
+
+              {creating && (
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <Loader2 className="size-4 animate-spin" />
+                  Creating {groups.length} intersections…
+                </div>
               )}
             </div>
           )}
@@ -934,7 +1248,100 @@ export function OnboardingWizard({ open, initialStep, onClose }: OnboardingWizar
             </div>
           )}
 
-          {/* regions step renders as a compact floating panel (early return above) */}
+          {/* ── Regions ─────────────────────────────────────────────────────── */}
+          {stepId === 'regions' && !regionsMinimized && (() => {
+            const allDone = regionCams.length > 0 && regionCams.every(c => c.hasRegions);
+            const pendingCount = regionCams.filter(c => !c.hasRegions).length;
+            return (
+              <div className="flex flex-col gap-6">
+                <div>
+                  <h2 className="text-2xl font-semibold">Draw detection regions</h2>
+                  <p className="text-muted-foreground mt-2">
+                    Open each camera below and draw a counting polygon on the live video frame.
+                    Click the first point again (green dot) to close the polygon and save the region.
+                    You can skip this step and finish later from the Cameras page.
+                  </p>
+                </div>
+
+                {allDone ? (
+                  <div className="rounded-lg bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-900 px-4 py-3 text-sm text-emerald-700 dark:text-emerald-400 font-medium">
+                    All cameras have regions - ready to continue.
+                  </div>
+                ) : regionCams.length > 0 && (
+                  <div className="rounded-lg bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900 px-4 py-3 text-sm text-amber-700 dark:text-amber-400">
+                    {pendingCount} of {regionCams.length} cameras don’t have regions yet.
+                    Counts from those will be ignored until you draw one - you can come back to it later.
+                  </div>
+                )}
+
+                <div className="flex flex-col gap-2">
+                  {regionLoading ? (
+                    <div className="flex items-center gap-2 text-sm text-muted-foreground py-4">
+                      <Loader2 className="size-4 animate-spin" />
+                      Loading cameras…
+                    </div>
+                  ) : regionCams.length === 0 ? (
+                    <p className="text-sm text-muted-foreground py-4">
+                      No cameras found. Go back and complete the camera setup steps.
+                    </p>
+                  ) : (
+                    regionCams.map(cam => (
+                      <div
+                        key={cam.id}
+                        className={cn(
+                          'flex items-center gap-3 rounded-lg border p-3',
+                          cam.hasRegions
+                            ? 'border-emerald-500/30 bg-emerald-50 dark:bg-emerald-950/20'
+                            : 'border-border bg-muted/20',
+                        )}
+                      >
+                        <div
+                          className={cn(
+                            'size-7 rounded-full flex items-center justify-center shrink-0',
+                            cam.hasRegions ? 'bg-emerald-500/20' : 'bg-muted',
+                          )}
+                        >
+                          {cam.hasRegions
+                            ? <Check className="size-4 text-emerald-600" />
+                            : <span className="text-xs text-muted-foreground">○</span>}
+                        </div>
+                        <span className={cn(
+                          'text-sm flex-1 truncate',
+                          cam.hasRegions ? 'text-emerald-700 dark:text-emerald-400 font-medium' : '',
+                        )}>
+                          {cam.name}
+                        </span>
+                        <Button size="sm" variant={cam.hasRegions ? 'outline' : 'default'} asChild>
+                          <Link to={`/intersections/${createdIntersectionId}/cameras/${cam.id}`}>
+                            {cam.hasRegions ? 'Re-draw' : 'Open camera'}
+                            <ExternalLink className="size-3 ml-1.5" />
+                          </Link>
+                        </Button>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => regionTargetId != null && loadRegionStatus(regionTargetId)}
+                    disabled={regionLoading}
+                  >
+                    {regionLoading ? <Loader2 className="size-3.5 mr-1.5 animate-spin" /> : <RefreshCw className="size-3.5 mr-1.5" />}
+                    Refresh status
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => setRegionsMinimized(true)}>
+                    Minimize to corner
+                  </Button>
+                  <span className="ml-auto">
+                    Opening a camera leaves the wizard running - come back here to continue.
+                  </span>
+                </div>
+              </div>
+            );
+          })()}
 
           {/* ── Timing ───────────────────────────────────────────────────── */}
           {stepId === 'timing' && (
@@ -956,7 +1363,9 @@ export function OnboardingWizard({ open, initialStep, onClose }: OnboardingWizar
                 <>
                   {/* Signal status toggle */}
                   <div className="flex flex-col gap-2">
-                    <Label>Signal status</Label>
+                    <Label className="inline-flex items-center gap-1">
+                      Signal status <JargonTip term="signal_status" />
+                    </Label>
                     <div className="flex gap-2 flex-wrap">
                       {(['unsignalized', 'fixed_time', 'actuated'] as const).map(s => (
                         <button
@@ -980,7 +1389,9 @@ export function OnboardingWizard({ open, initialStep, onClose }: OnboardingWizar
                     <>
                       {/* Cycle length */}
                       <div className="flex flex-col gap-2">
-                        <Label htmlFor="timing-cycle">Cycle length</Label>
+                        <Label htmlFor="timing-cycle" className="inline-flex items-center gap-1">
+                          Cycle length <JargonTip term="cycle_length" />
+                        </Label>
                         <div className="flex items-center gap-2">
                           <Input
                             id="timing-cycle"
@@ -998,7 +1409,9 @@ export function OnboardingWizard({ open, initialStep, onClose }: OnboardingWizar
                       {/* Green splits table */}
                       {timingApproaches.length > 0 && (
                         <div className="flex flex-col gap-2">
-                          <Label>Green time per approach</Label>
+                          <Label className="inline-flex items-center gap-1">
+                            Green time per approach <JargonTip term="green_split" />
+                          </Label>
                           <div className="rounded-lg border border-border overflow-hidden">
                             <table className="w-full text-sm">
                               <thead>
@@ -1230,7 +1643,15 @@ export function OnboardingWizard({ open, initialStep, onClose }: OnboardingWizar
       <div className="flex items-center justify-between px-8 py-4 border-t border-border shrink-0">
         <Button
           variant="outline"
-          onClick={() => canGoBack && goTo(WIZARD_STEPS[stepIndex - 1].id)}
+          // Back skips 'group' when the operator is on the single-intersection
+          // path (groups never populated) so they land back at Discover, not
+          // an empty group screen.
+          onClick={() => {
+            if (!canGoBack) return;
+            let prev = stepIndex - 1;
+            if (WIZARD_STEPS[prev]?.id === 'group' && groups.length === 0) prev -= 1;
+            if (prev >= 0) goTo(WIZARD_STEPS[prev].id);
+          }}
           disabled={!canGoBack || busy}
         >
           <ArrowLeft className="size-4 mr-2" />

@@ -83,6 +83,9 @@ def update_intersection(
     if intersection.crossing_width_m is not None:
         db_intersection.crossing_width_m = intersection.crossing_width_m
 
+    if intersection.saturation_flow_pcu_hr is not None:
+        db_intersection.saturation_flow_pcu_hr = intersection.saturation_flow_pcu_hr
+
     log_and_commit(message, db)
     db.refresh(db_intersection)
     return db_intersection
@@ -274,6 +277,70 @@ def detect_signal_timing(
 
     result = estimate_signal_timing(db, intersection_id)
     return DetectTimingResponse(intersection_id=intersection_id, **result)
+
+
+class SetupTaskMutation(BaseModel):
+    task: str
+
+
+# Vocabulary kept loose on purpose - the frontend owns the set of task names
+# (regions/timing/first_analysis/...) and may evolve them without a schema
+# change. Server only persists the strings.
+ALLOWED_DISMISS_TASKS = {
+    "cameras", "regions", "timing", "first_analysis",
+}
+
+
+@router.post("/{intersection_id}/dismiss-setup-task", response_model=IntersectionResponse)
+def dismiss_setup_task(
+    intersection_id: int,
+    body: SetupTaskMutation,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> IntersectionResponse:
+    """Snooze one onboarding task for an intersection.
+
+    Used by the sidebar Setup Progress popover. Dismissals are permanent
+    (until the operator restores them) - that matches the way operators
+    actually use the popover: "yes, I know this intersection doesn't need
+    regions, stop nagging me."
+    """
+    if body.task not in ALLOWED_DISMISS_TASKS:
+        raise HTTPException(status_code=422, detail=f"Unknown task: {body.task}")
+    db_intersection = db.get(Intersection, intersection_id)
+    if not db_intersection:
+        raise HTTPException(status_code=404, detail="Intersection not found")
+    current = list(db_intersection.dismissed_setup_tasks or [])
+    if body.task not in current:
+        current.append(body.task)
+        db_intersection.dismissed_setup_tasks = current
+    log_and_commit(
+        f"User {user.username} dismissed setup task '{body.task}' on {db_intersection.name}",
+        db,
+    )
+    db.refresh(db_intersection)
+    return db_intersection
+
+
+@router.post("/{intersection_id}/restore-setup-task", response_model=IntersectionResponse)
+def restore_setup_task(
+    intersection_id: int,
+    body: SetupTaskMutation,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> IntersectionResponse:
+    """Un-dismiss a previously snoozed onboarding task."""
+    db_intersection = db.get(Intersection, intersection_id)
+    if not db_intersection:
+        raise HTTPException(status_code=404, detail="Intersection not found")
+    current = [t for t in (db_intersection.dismissed_setup_tasks or []) if t != body.task]
+    db_intersection.dismissed_setup_tasks = current
+    log_and_commit(
+        f"User {user.username} restored setup task '{body.task}' on {db_intersection.name}",
+        db,
+    )
+    db.refresh(db_intersection)
+    return db_intersection
 
 
 @router.delete("/{intersection_id}", status_code=204)

@@ -232,7 +232,13 @@ export function SettingsSheet({ inter, streets, cameras, rec, open, onClose, onR
 
   if (!inter) return null;
 
-  const bucket      = rec ? statusBucket(rec) : null;
+  // See IntersectionShell.tsx: the warrant bucket is moot for signalized
+  // intersections (you can't install a signal where one already exists), so
+  // hide that badge here for the same reason. The signal-status badge below
+  // already tells the operator that the intersection is signalized.
+  const isSignalized =
+    inter.signal_status === 'fixed_time' || inter.signal_status === 'actuated';
+  const bucket      = rec && !isSignalized ? statusBucket(rec) : null;
   const onlineCount = cameras.filter(c => c.status === 'online').length;
 
   return (

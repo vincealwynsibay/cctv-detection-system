@@ -129,9 +129,11 @@ WEEKDAY_MULTIPLIER = 1.0   # Mon–Fri
 WEEKEND_MULTIPLIER = 0.65  # Sat–Sun (lighter traffic)
 
 # Peak-hour base detections per camera per hour.
-# With 4 cameras at an intersection summing counts, this gives ~320–400/hr
-# at the intersection level during peak -enough to meet Warrant 1 (300/hr × 8 hrs).
-PEAK_DETECTIONS_PER_CAMERA_PER_HOUR = 90
+# With 4 cameras at an intersection summing counts, 360 yields ~1280–1600/hr
+# at the intersection level during peak - well over Warrant 1 (300/hr × 8 hrs)
+# and dense enough that the "Live load" 1-minute SSE window reads meaningfully
+# at mid-day multipliers (~6-12/intersection/min off-peak).
+PEAK_DETECTIONS_PER_CAMERA_PER_HOUR = 360
 
 # ---------------------------------------------------------------------------
 # Intersections to seed -real Tagum City locations
@@ -399,10 +401,12 @@ def seed_base_data(db) -> list[tuple]:
 # Fill (bulk insert with traffic patterns)
 # ---------------------------------------------------------------------------
 
-def fill_all(db, days: int, weights: dict):
+def fill_all(db, days: int, weights: dict, future: bool = False):
     """
     Generate `days` days of realistic detections for every camera/region in the DB.
     Skips hours that already have detections to avoid doubling up on re-runs.
+
+    When future=True, fills [now, now + days] instead of [now - days, now].
     """
     from sqlalchemy import text
 
@@ -415,8 +419,13 @@ def fill_all(db, days: int, weights: dict):
         print("No cameras/regions found -run --seed first.")
         return
 
-    now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
-    start = now -timedelta(days=days)
+    anchor = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    if future:
+        start = anchor
+        now = anchor + timedelta(days=days)
+    else:
+        now = anchor
+        start = now - timedelta(days=days)
 
     total_inserted = 0
 
@@ -1839,6 +1848,9 @@ def main():
 
     parser.add_argument("--days",      type=int,   default=14,
                         help="Days of history to generate with --fill (default: 14)")
+    parser.add_argument("--future",    action="store_true",
+                        help="With --fill, generate detections going forward from now "
+                             "instead of backward (default: backward)")
 
     # Legacy single-camera mode
     parser.add_argument("--cctv-id",   type=int,   default=None)
@@ -1858,7 +1870,7 @@ def main():
     try:
         if args.full:
             seed_base_data(db)
-            fill_all(db, args.days, weights)
+            fill_all(db, args.days, weights, future=args.future)
             return
 
         if args.seed:
@@ -1886,7 +1898,7 @@ def main():
             return
 
         if args.fill:
-            fill_all(db, args.days, weights)
+            fill_all(db, args.days, weights, future=args.future)
             return
 
         if args.list:

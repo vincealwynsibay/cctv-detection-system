@@ -7,7 +7,14 @@ const BORDERLINE_HIGH = 0.5;
 
 /** Classify a recommendation into one of four triage buckets.
  * `hour_start === null` covers rows written before the migration.
- * The triple-zero check covers the empty-data short-circuit. */
+ * The triple-zero check covers the empty-data short-circuit.
+ *
+ * 'warranted' requires at least one *individual* warrant to be met. The CNN's
+ * overall `recommended` flag and its per-warrant heads are independent and can
+ * disagree (e.g. recommended=true with all of w1/w2/w4 below 0.5). Promoting
+ * those edge cases to "Warranted" misled the Timing tab into showing a
+ * Warranted badge alongside body copy that read "doesn't trigger any warrant".
+ */
 export function statusBucket(rec: RecommendationResponse): StatusBucket {
   if (
     rec.hour_start === null ||
@@ -15,7 +22,10 @@ export function statusBucket(rec: RecommendationResponse): StatusBucket {
   ) {
     return 'no_data';
   }
-  if (rec.recommended) return 'warranted';
+  const anyWarrantMet =
+    rec.warrant_1_met || rec.warrant_2_met || rec.warrant_4_met ||
+    !!rec.w_local_1_met || !!rec.w_local_2_met || !!rec.w_local_3_met;
+  if (rec.recommended && anyWarrantMet) return 'warranted';
   const confs = [rec.warrant_1_confidence, rec.warrant_2_confidence, rec.warrant_4_confidence];
   if (confs.some(c => c >= BORDERLINE_LOW && c < BORDERLINE_HIGH)) return 'borderline';
   return 'not_warranted';

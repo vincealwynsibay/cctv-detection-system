@@ -16,7 +16,7 @@ import {
 } from '@/lib/aggregation-query';
 import type { AggregationRow, Intersection, Street } from '@/types';
 import type { SSEStatus } from '@/hooks/useSSE';
-import { Download, TrendingUp, Users, Clock, Car, Loader2, FileText, ArrowRight } from 'lucide-react';
+import { Download, TrendingUp, Users, Clock, Car, Loader2, FileText, ArrowRight, Printer } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
 
@@ -183,8 +183,13 @@ export function ReportsPage() {
     <div className="flex flex-col gap-6">
 
       {/* Header */}
-      <div className="flex items-center justify-between gap-2 flex-wrap">
-        <h1 className="text-lg font-semibold tracking-tight text-green-950">Reports</h1>
+      <div className="flex items-start justify-between gap-2 flex-wrap print:hidden">
+        <div className="flex flex-col">
+          <h1 className="text-lg font-semibold tracking-tight text-green-950">Reports</h1>
+          <p className="text-sm text-muted-foreground mt-0.5">
+            Multi-intersection summary and CSV export for handoff to traffic engineers.
+          </p>
+        </div>
         <div className="flex items-center gap-2 flex-wrap">
           {selectedIntersection !== 'all' && (
             <Button asChild variant="default" size="sm">
@@ -195,6 +200,10 @@ export function ReportsPage() {
               </Link>
             </Button>
           )}
+          <Button variant="outline" size="sm" onClick={() => window.print()} disabled={!data.length}>
+            <Printer className="size-3.5 mr-1.5" />
+            Print
+          </Button>
           <Button variant="outline" size="sm" onClick={exportCSV} disabled={!data.length}>
             <Download data-icon="inline-start" />
             Export CSV
@@ -202,8 +211,24 @@ export function ReportsPage() {
         </div>
       </div>
 
+      {/* Print-only header - operator can hand the printout to an engineer */}
+      <div className="hidden print:block mb-2">
+        <h1 className="text-lg font-bold">
+          EyeGila Reports - {selectedIntersection === 'all'
+            ? 'All intersections'
+            : (intersections.find(i => String(i.id) === selectedIntersection)?.name ?? 'Intersection')}
+        </h1>
+        <p className="text-xs text-gray-500 mt-0.5">
+          {start.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}
+          {' – '}
+          {new Date(end.getTime() - 1).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}
+          {' · grouped by '}{bucket}
+          {' · Generated '}{new Date().toLocaleString('en-PH', { timeZoneName: 'short' })}
+        </p>
+      </div>
+
       {/* Date range selector */}
-      <div className="rounded-xl border border-border bg-card px-4 py-3 flex flex-col gap-3">
+      <div className="rounded-xl border border-border bg-card px-4 py-3 flex flex-col gap-3 print:hidden">
         <div className="flex flex-wrap gap-1.5">
           {PRESETS.map(p => (
             <button
@@ -283,7 +308,7 @@ export function ReportsPage() {
 
       {/* Live now strip - operators want current state above the historical view */}
       {sseData && (
-        <div className="rounded-lg border border-green-100 bg-green-50 px-4 py-2.5 flex items-center justify-between">
+        <div className="rounded-lg border border-green-100 bg-green-50 px-4 py-2.5 flex items-center justify-between print:hidden">
           <span className="text-xs text-green-700 font-medium flex items-center gap-1.5">
             <span className="size-1.5 rounded-full bg-green-500 animate-pulse" />
             Live window
@@ -319,7 +344,7 @@ export function ReportsPage() {
             <Users className="size-5 text-cyan-300 mt-0.5" />
           </CardContent>
         </Card>
-        <Card>
+        <Card className="print:break-inside-avoid">
           <CardContent className="p-4 flex items-start justify-between">
             <div>
               <div className="text-2xl font-black tabular-nums">{loading ? '-' : (topType?.[0] ?? '-')}</div>
@@ -330,7 +355,7 @@ export function ReportsPage() {
             <TrendingUp className="size-5 text-muted-foreground/25 mt-0.5" />
           </CardContent>
         </Card>
-        <Card>
+        <Card className="print:break-inside-avoid">
           <CardContent className="p-4 flex items-start justify-between">
             <div>
               <div className="text-lg font-bold tabular-nums leading-tight">
@@ -347,7 +372,7 @@ export function ReportsPage() {
       </div>
 
       {/* Main time-series */}
-      <Card>
+      <Card className="print:break-inside-avoid">
         <CardHeader className="pb-2">
           <CardTitle className="text-sm font-semibold text-slate-700">
             Vehicles &amp; Pedestrians Over Time
@@ -370,16 +395,22 @@ export function ReportsPage() {
               No data for this period
             </div>
           ) : (
-            <ResponsiveContainer width="100%" height={260}>
-              <LineChart data={timeSeriesData} margin={{ left: 0, right: 8 }}>
+            <ResponsiveContainer width="100%" height={280}>
+              <LineChart data={timeSeriesData} margin={{ left: 4, right: 8, bottom: 14 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
                 <XAxis
                   dataKey="label"
                   tick={{ fontSize: 10, fill: '#94a3b8' }}
                   axisLine={false} tickLine={false}
                   interval="preserveStartEnd"
+                  label={{ value: bucket === 'hour' ? 'Time' : 'Date', position: 'insideBottom', offset: -10, style: { fontSize: 10, fill: '#64748b' } }}
                 />
-                <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} axisLine={false} tickLine={false} width={36} />
+                <YAxis
+                  tick={{ fontSize: 10, fill: '#94a3b8' }}
+                  axisLine={false} tickLine={false}
+                  width={48}
+                  label={{ value: 'Count', angle: -90, position: 'insideLeft', style: { fontSize: 10, fill: '#64748b', textAnchor: 'middle' } }}
+                />
                 <Tooltip
                   contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e2e8f0' }}
                   cursor={{ stroke: '#e2e8f0' }}
@@ -413,7 +444,7 @@ export function ReportsPage() {
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
 
         {/* Vehicle type breakdown */}
-        <Card>
+        <Card className="print:break-inside-avoid">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-semibold text-slate-700">By Vehicle Type</CardTitle>
           </CardHeader>
@@ -425,11 +456,21 @@ export function ReportsPage() {
             ) : typeChartData.length === 0 ? (
               <div className="flex h-48 items-center justify-center text-sm text-muted-foreground">No data</div>
             ) : (
-              <ResponsiveContainer width="100%" height={200}>
-                <BarChart data={typeChartData} barCategoryGap="28%">
+              <ResponsiveContainer width="100%" height={220}>
+                <BarChart data={typeChartData} barCategoryGap="28%" margin={{ left: 4, right: 8, bottom: 14 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
-                  <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} />
-                  <YAxis tick={{ fontSize: 11, fill: '#94a3b8' }} axisLine={false} tickLine={false} width={36} />
+                  <XAxis
+                    dataKey="label"
+                    tick={{ fontSize: 11, fill: '#64748b' }}
+                    axisLine={false} tickLine={false}
+                    label={{ value: 'Vehicle type', position: 'insideBottom', offset: -10, style: { fontSize: 10, fill: '#64748b' } }}
+                  />
+                  <YAxis
+                    tick={{ fontSize: 11, fill: '#94a3b8' }}
+                    axisLine={false} tickLine={false}
+                    width={48}
+                    label={{ value: 'Count', angle: -90, position: 'insideLeft', style: { fontSize: 10, fill: '#64748b', textAnchor: 'middle' } }}
+                  />
                   <Tooltip
                     contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e2e8f0' }}
                     cursor={{ fill: '#f8fafc' }}
@@ -447,7 +488,7 @@ export function ReportsPage() {
         </Card>
 
         {/* Street/approach breakdown */}
-        <Card>
+        <Card className="print:break-inside-avoid">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-semibold text-slate-700">By Approach Direction</CardTitle>
           </CardHeader>
@@ -459,11 +500,23 @@ export function ReportsPage() {
             ) : streetChartData.length === 0 ? (
               <div className="flex h-48 items-center justify-center text-sm text-muted-foreground">No data</div>
             ) : (
-              <ResponsiveContainer width="100%" height={Math.max(200, streetChartData.length * 32)}>
-                <BarChart data={streetChartData} layout="vertical" barCategoryGap="25%">
+              <ResponsiveContainer width="100%" height={Math.max(220, streetChartData.length * 32 + 24)}>
+                <BarChart data={streetChartData} layout="vertical" barCategoryGap="25%" margin={{ left: 4, right: 8, bottom: 14 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" horizontal={false} />
-                  <XAxis type="number" tick={{ fontSize: 10, fill: '#94a3b8' }} axisLine={false} tickLine={false} tickFormatter={v => Number(v).toLocaleString()} />
-                  <YAxis type="category" dataKey="name" tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} width={100} />
+                  <XAxis
+                    type="number"
+                    tick={{ fontSize: 10, fill: '#94a3b8' }}
+                    axisLine={false} tickLine={false}
+                    tickFormatter={v => Number(v).toLocaleString()}
+                    label={{ value: 'Total count', position: 'insideBottom', offset: -10, style: { fontSize: 10, fill: '#64748b' } }}
+                  />
+                  <YAxis
+                    type="category"
+                    dataKey="name"
+                    tick={{ fontSize: 11, fill: '#64748b' }}
+                    axisLine={false} tickLine={false}
+                    width={110}
+                  />
                   <Tooltip
                     contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e2e8f0' }}
                     cursor={{ fill: '#f8fafc' }}
@@ -479,7 +532,7 @@ export function ReportsPage() {
       </div>
 
       {/* Peak hour of day */}
-      <Card>
+      <Card className="print:break-inside-avoid">
         <CardHeader className="pb-2">
           <CardTitle className="text-sm font-semibold text-slate-700">Traffic by Hour of Day</CardTitle>
           <CardDescription className="text-xs">
@@ -494,16 +547,22 @@ export function ReportsPage() {
           ) : data.length === 0 ? (
             <div className="flex h-48 items-center justify-center text-sm text-muted-foreground">No data</div>
           ) : (
-            <ResponsiveContainer width="100%" height={200}>
-              <BarChart data={hourlyData} barCategoryGap="15%" margin={{ left: 0, right: 8 }}>
+            <ResponsiveContainer width="100%" height={220}>
+              <BarChart data={hourlyData} barCategoryGap="15%" margin={{ left: 4, right: 8, bottom: 14 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
                 <XAxis
                   dataKey="label"
                   tick={{ fontSize: 9, fill: '#94a3b8' }}
                   axisLine={false} tickLine={false}
                   interval={1}
+                  label={{ value: 'Hour of day', position: 'insideBottom', offset: -10, style: { fontSize: 10, fill: '#64748b' } }}
                 />
-                <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} axisLine={false} tickLine={false} width={36} />
+                <YAxis
+                  tick={{ fontSize: 10, fill: '#94a3b8' }}
+                  axisLine={false} tickLine={false}
+                  width={48}
+                  label={{ value: 'Count', angle: -90, position: 'insideLeft', style: { fontSize: 10, fill: '#64748b', textAnchor: 'middle' } }}
+                />
                 <Tooltip
                   contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e2e8f0' }}
                   cursor={{ fill: '#f8fafc' }}

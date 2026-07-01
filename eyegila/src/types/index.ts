@@ -14,6 +14,8 @@ export interface User {
 
 export type SignalStatus = 'unsignalized' | 'fixed_time' | 'actuated';
 
+export type OnboardingTask = 'cameras' | 'regions' | 'timing' | 'first_analysis';
+
 export interface Intersection {
   id: number;
   name: string;
@@ -23,6 +25,8 @@ export interface Intersection {
   existing_cycle_length: number | null;
   existing_green_splits: Record<string, number> | null;
   effective_green_splits: Record<string, number> | null;
+  /** Onboarding tasks the operator has snoozed for this intersection. */
+  dismissed_setup_tasks: OnboardingTask[];
   time: string;
 }
 
@@ -138,4 +142,9 @@ export interface Recommendation {
   // and simulation rows still exist for transparency, but the SignalTiming page
   // renders them in a muted comparison mode rather than as a recommended plan.
   proposal_is_no_op: boolean;
+  // Daily total vehicle-hours saved (positive) or added (negative) by Webster's
+  // proposal across TOD chunks. Lets the dashboard reconcile the volume-based
+  // MUTCD verdict with the delay-based outcome without fetching the full
+  // simulation. Null when no simulation rows exist for this recommendation.
+  webster_vh_saved_per_day: number | null;
 }

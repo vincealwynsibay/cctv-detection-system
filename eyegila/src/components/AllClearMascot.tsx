@@ -8,8 +8,7 @@ interface AllClearMascotProps {
 /**
  * Friendly traffic officer mascot for the dashboard's "all clear" panel.
  * Stylised flat illustration: stocky proportions, soft palette, thumbs-up
- * pose. Designed to match the visual language of LoadingRobot.tsx so the
- * two characters read as siblings.
+ * pose.
  */
 export function AllClearMascot({ size = 140, className }: AllClearMascotProps) {
   const h = Math.round(size * 1.15);

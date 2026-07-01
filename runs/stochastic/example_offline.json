@@ -1,0 +1,61 @@
+{
+  "intersection_id": "example",
+  "intersection_name": "",
+  "signal_status": "",
+  "window": {
+    "start_iso": "2026-06-15T07:00:00",
+    "end_iso": "2026-06-15T08:00:00",
+    "duration_sec": 3600
+  },
+  "config": {
+    "n_runs": 30,
+    "sat_flow_pcu_hr": 1400,
+    "driver_reaction_sd_sec": 1.0,
+    "base_seed": 42
+  },
+  "per_approach": {
+    "1": {
+      "approach_label": "NB",
+      "flow_pcu_hr": 400.0,
+      "before": {
+        "mean": 37.3582,
+        "std": 6.4433,
+        "ci_low_95": 34.9522,
+        "ci_high_95": 39.7642,
+        "n_runs": 30
+      },
+      "after": {
+        "mean": 17.3904,
+        "std": 1.064,
+        "ci_low_95": 16.9931,
+        "ci_high_95": 17.7877,
+        "n_runs": 30
+      }
+    },
+    "2": {
+      "approach_label": "EB",
+      "flow_pcu_hr": 300.0,
+      "before": {
+        "mean": 27.849,
+        "std": 1.7945,
+        "ci_low_95": 27.1789,
+        "ci_high_95": 28.5191,
+        "n_runs": 30
+      },
+      "after": {
+        "mean": 27.6675,
+        "std": 1.918,
+        "ci_low_95": 26.9513,
+        "ci_high_95": 28.3837,
+        "n_runs": 30
+      }
+    }
+  },
+  "vehicle_hours_saved": {
+    "mean": 2.2295,
+    "std": 0.7763,
+    "ci_low_95": 1.9396,
+    "ci_high_95": 2.5194,
+    "n_runs": 30
+  }
+}

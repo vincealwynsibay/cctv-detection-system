@@ -278,8 +278,14 @@ export function CameraDetailPage() {
     try {
       await cctvsApi.retry(cctv.id);
       toast.success('Retry signal sent - worker will reconnect immediately');
-    } catch {
-      toast.error('Failed to send retry signal');
+    } catch (err: unknown) {
+      const status = (err as { status?: number })?.status;
+      const message = err instanceof Error ? err.message : 'Failed to send retry signal';
+      if (status === 409) {
+        toast.warning(message);
+      } else {
+        toast.error(message);
+      }
     } finally {
       setRetrying(false);
     }
@@ -563,6 +569,9 @@ export function CameraDetailPage() {
         </Button>
         <div className="flex-1">
           <h1 className="text-xl font-semibold tracking-tight">{cctv?.name ?? 'Camera'}</h1>
+          <p className="text-xs text-muted-foreground mt-0.5 print:hidden">
+            Live preview, detection regions, and stream health for this camera.
+          </p>
         </div>
         {cctv && (
           <Badge

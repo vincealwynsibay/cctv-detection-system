@@ -133,14 +133,14 @@ const ARC_SAMPLES = 10;
 //   cp.z = exit.z    (final tangent = pure exit direction)
 // This makes the vehicle drive forward first and then arc smoothly through
 // the inside corner of the turn. The old right-turn BOX-corner anchor had
-// the wrong initial tangent — e.g. SB→W started with a pure −X velocity
+// the wrong initial tangent - e.g. SB→W started with a pure −X velocity
 // even though the entry direction is +Z, producing a visible sideways
 // swerve the instant the vehicle cleared the stop line.
 // cp.x = entry-invariant x (SB/NB pin x to entry.x; WB/EB pin x to exit.x)
 // cp.y = entry-invariant y (WB/EB pin y to entry.y; SB/NB pin y to exit.y)
 // Result: initial bezier tangent = entry direction, final = exit direction,
 // so vehicles drive straight first and then arc smoothly through the inside
-// corner of the turn — no sideways veer on either left or right turns.
+// corner of the turn - no sideways veer on either left or right turns.
 const TURN_CP: Record<'left' | 'right', [number, number][]> = {
   left:  [
     [-LANE_OFF, LANE_OFF],   // 0 SB → E (entry x=-LANE, exit y=+LANE)
@@ -330,6 +330,7 @@ function stepPhysics(
 
 // --- Spawn ---
 
+// Interval-driven spawning (Poisson reconstruction from aggregate volume).
 function spawnVehicles(
   vehicles: Vehicle[],
   timers: number[],
@@ -346,30 +347,70 @@ function spawnVehicles(
 
     while (timers[i] >= intervals[i]) {
       timers[i] -= intervals[i];
-
-      // Per-approach cap counts only queuing (non-clearing) vehicles
-      const apVehicles = vehicles.filter(v => v.approach === i && !v.clearing);
-      if (apVehicles.length >= MAX_QUEUE) continue;
-
-      const type = sampleType(typeMixByApproach[i] ?? DEFAULT_TYPE_MIX);
-      const p = VEHICLE_PARAMS[type];
-      const spawnDist = ARM_UNITS - p.length;
-
-      if (apVehicles.length > 0) {
-        const maxBack = Math.max(...apVehicles.map(v => v.distFromStop + VEHICLE_PARAMS[v.type].length));
-        if (spawnDist - maxBack < p.minGap) continue;
-      }
-
-      // Sample critical gap from a uniform distribution [5.0, 8.5] s - driver heterogeneity
-      const critGap = 5.0 + Math.random() * 3.5;
-      vehicles.push({
-        id: nextId.current++, type, approach: i,
-        distFromStop: spawnDist, currSpeed: 0, clearing: false,
-        turn: null, px: 0, py: 0, waypoints: [],
-        critGap,
-      });
+      if (!trySpawnOne(vehicles, nextId, i, typeMixByApproach)) break;
     }
   }
+}
+
+// Schedule-driven spawning. Replays per-second vehicle counts from real
+// detections so the playback matches when traffic actually arrived. Falls
+// back gracefully when an approach has no schedule entry.
+function spawnFromArrivals(
+  vehicles: Vehicle[],
+  nextId: { current: number },
+  ids: string[],
+  activeApproaches: Set<number>,
+  arrivalsByApproach: (number[] | undefined)[],
+  carries: number[],
+  lastSecRef: { current: number },
+  typeMixByApproach: TypeFractions[],
+  simT: number,
+): void {
+  const curSec = Math.floor(simT);
+  while (lastSecRef.current < curSec) {
+    lastSecRef.current += 1;
+    for (let i = 0; i < 4; i++) {
+      const arr = arrivalsByApproach[i];
+      if (!arr || arr.length === 0) continue;
+      carries[i] += arr[lastSecRef.current % arr.length] ?? 0;
+    }
+  }
+  for (let i = 0; i < ids.length && i < 4; i++) {
+    if (!activeApproaches.has(i)) continue;
+    while (carries[i] >= 1) {
+      if (!trySpawnOne(vehicles, nextId, i, typeMixByApproach)) break;
+      carries[i] -= 1;
+    }
+  }
+}
+
+function trySpawnOne(
+  vehicles: Vehicle[],
+  nextId: { current: number },
+  i: number,
+  typeMixByApproach: TypeFractions[],
+): boolean {
+  const apVehicles = vehicles.filter(v => v.approach === i && !v.clearing);
+  if (apVehicles.length >= MAX_QUEUE) return false;
+
+  const type = sampleType(typeMixByApproach[i] ?? DEFAULT_TYPE_MIX);
+  const p = VEHICLE_PARAMS[type];
+  const spawnDist = ARM_UNITS - p.length;
+
+  if (apVehicles.length > 0) {
+    const maxBack = Math.max(...apVehicles.map(v => v.distFromStop + VEHICLE_PARAMS[v.type].length));
+    if (spawnDist - maxBack < p.minGap) return false;
+  }
+
+  // Sample critical gap from a uniform distribution [5.0, 8.5] s - driver heterogeneity
+  const critGap = 5.0 + Math.random() * 3.5;
+  vehicles.push({
+    id: nextId.current++, type, approach: i,
+    distFromStop: spawnDist, currSpeed: 0, clearing: false,
+    turn: null, px: 0, py: 0, waypoints: [],
+    critGap,
+  });
+  return true;
 }
 
 // --- Signal ---
@@ -891,6 +932,13 @@ export function IntersectionCanvas({
   const spawnIntervalsRef    = useRef<number[]>([Infinity, Infinity, Infinity, Infinity]);
   const activeApproachesRef  = useRef<Set<number>>(new Set());
 
+  // Arrival-driven spawn state. Populated only when `chunk.arrivals_per_second`
+  // is supplied (i.e. on-demand window endpoint). Each approach gets its own
+  // per-second count list aligned to ARM_DIR_TO_APPROACH.
+  const arrivalsByApproachRef = useRef<(number[] | undefined)[]>([undefined, undefined, undefined, undefined]);
+  const arrivalCarryRef       = useRef<number[]>([0, 0, 0, 0]);
+  const lastArrivalSecRef     = useRef<number>(-1);
+
   const ids = useMemo(() => {
     const s = chunk.queue_series_after ?? chunk.queue_series_before;
     const hasSeries = s && Object.keys(s).length > 0;
@@ -934,6 +982,19 @@ export function IntersectionCanvas({
     // Cap at 30 sim-s so low-volume intersections still show visible traffic.
     const interval = Math.min(3600 / Math.max(perApproachVolume, 0.1), 30);
     spawnIntervalsRef.current = [interval, interval, interval, interval];
+
+    const arr = chunk.arrivals_per_second ?? null;
+    arrivalsByApproachRef.current = ids
+      .slice(0, 4)
+      .map(id => (arr ? arr[id] : undefined));
+    // An approach with a real arrival schedule is always "active" — even if
+    // its queue_series is flat (e.g. low-volume side street) we still want to
+    // spawn the few vehicles that actually showed up.
+    if (arr) {
+      ids.slice(0, 4).forEach((id, i) => {
+        if ((arr[id]?.length ?? 0) > 0) activeApproachesRef.current.add(i);
+      });
+    }
   }, [chunk, ids]);
 
   // Reset vehicle state and sim clock when chunk changes
@@ -942,6 +1003,8 @@ export function IntersectionCanvas({
     spawnTimersRef.current    = [0, 0, 0, 0];
     nextVehicleIdRef.current  = 0;
     simTRef.current           = 0;
+    arrivalCarryRef.current   = [0, 0, 0, 0];
+    lastArrivalSecRef.current = -1;
     playingRef.current        = false;
     pausePaintedRef.current   = false;
     setPlaying(false);
@@ -1023,16 +1086,31 @@ export function IntersectionCanvas({
             const mixPerApproach = idsRef.current.map(
               sid => typeMixRef.current[sid] ?? DEFAULT_TYPE_MIX,
             );
-            spawnVehicles(
-              vehiclesRef.current,
-              spawnTimersRef.current,
-              nextVehicleIdRef,
-              idsRef.current,
-              activeApproachesRef.current,
-              spawnIntervalsRef.current,
-              mixPerApproach,
-              step,
-            );
+            const hasSchedule = arrivalsByApproachRef.current.some(a => a && a.length > 0);
+            if (hasSchedule) {
+              spawnFromArrivals(
+                vehiclesRef.current,
+                nextVehicleIdRef,
+                idsRef.current,
+                activeApproachesRef.current,
+                arrivalsByApproachRef.current,
+                arrivalCarryRef.current,
+                lastArrivalSecRef,
+                mixPerApproach,
+                subT + step,
+              );
+            } else {
+              spawnVehicles(
+                vehiclesRef.current,
+                spawnTimersRef.current,
+                nextVehicleIdRef,
+                idsRef.current,
+                activeApproachesRef.current,
+                spawnIntervalsRef.current,
+                mixPerApproach,
+                step,
+              );
+            }
             stepPhysics(vehiclesRef.current, step, greenFlags, useGapMode, subT);
 
             subT += step;
@@ -1072,12 +1150,14 @@ export function IntersectionCanvas({
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const resetState = () => {
-    vehiclesRef.current      = [];
-    spawnTimersRef.current   = [0, 0, 0, 0];
-    nextVehicleIdRef.current = 0;
-    simTRef.current          = 0;
-    playingRef.current       = false;
-    pausePaintedRef.current  = false;
+    vehiclesRef.current       = [];
+    spawnTimersRef.current    = [0, 0, 0, 0];
+    nextVehicleIdRef.current  = 0;
+    simTRef.current           = 0;
+    arrivalCarryRef.current   = [0, 0, 0, 0];
+    lastArrivalSecRef.current = -1;
+    playingRef.current        = false;
+    pausePaintedRef.current   = false;
     setPlaying(false);
   };
 
@@ -1177,17 +1257,20 @@ export function IntersectionCanvas({
       </div>
 
       {!isFullscreen && (
-        <p className="text-xs text-muted-foreground">
-          After: Webster signal cycles · Before / signal-off: gap-acceptance (6 s) · toggle live
-        </p>
+        <div className="space-y-1">
+          <p className="text-xs text-muted-foreground">
+            After: Webster signal cycles · Before / signal-off: gap-acceptance (6 s) · toggle live
+          </p>
+          <p className="text-[10px] text-amber-500/90">
+            Indicative playback. Queues are reconstructed from Webster's average delay, not a forecast of real arrivals.
+          </p>
+        </div>
       )}
     </div>
   );
 }
 
 // --- Dual simulation ---
-
-const PESO_PER_VEH_HR = 65; // conservative value-of-time estimate (₱/veh-hr) for PH secondary city
 
 function createSimState() {
   return {
@@ -1219,16 +1302,22 @@ export function DualIntersectionCanvas({
   streets = [],
   existingCycleS = null,
   existingGreenSplits = null,
+  lockedViewMode = null,
 }: {
   chunk: SimulationChunk;
   timing: TimingChunk | null;
   signalStatus: string;
   typeMix?: Record<string, TypeFractions>;
   paused?: boolean;
-  speed?: 1 | 4 | 8;
+  speed?: 1 | 4 | 8 | 16 | 32 | 64;
   streets?: Street[];
   existingCycleS?: number | null;
   existingGreenSplits?: Record<string, number> | null;
+  // When set, pins the canvas to one view (e.g. 'before' for "current state
+  // only", 'dual' for the side-by-side) and hides the manual toggle.
+  // Callers like IntersectionStory use this so each story step has a
+  // distinct visual; null = the original interactive behaviour.
+  lockedViewMode?: 'before' | 'dual' | 'after' | null;
 }) {
   const wrapperRef        = useRef<HTMLDivElement>(null);
   const canvasBeforeRef   = useRef<HTMLCanvasElement>(null);
@@ -1262,6 +1351,14 @@ export function DualIntersectionCanvas({
   const spawnIntervalsRef   = useRef<number[]>([Infinity, Infinity, Infinity, Infinity]);
   const activeApproachesRef = useRef<Set<number>>(new Set());
 
+  // Arrival-driven spawn state. One pair of carry/lastSec refs per side so the
+  // before/after sims walk through the same real schedule independently.
+  const arrivalsByApproachRef = useRef<(number[] | undefined)[]>([undefined, undefined, undefined, undefined]);
+  const beforeCarryRef        = useRef<number[]>([0, 0, 0, 0]);
+  const afterCarryRef         = useRef<number[]>([0, 0, 0, 0]);
+  const beforeLastSecRef      = useRef<number>(-1);
+  const afterLastSecRef       = useRef<number>(-1);
+
   const ids = useMemo(() => {
     const s = chunk.queue_series_after ?? chunk.queue_series_before;
     const hasSeries = s && Object.keys(s).length > 0;
@@ -1287,7 +1384,11 @@ export function DualIntersectionCanvas({
 
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [liveQ, setLiveQ]             = useState({ before: 0, after: 0 });
-  const [viewMode, setViewMode]       = useState<'before' | 'dual' | 'after'>('dual');
+  const [viewModeState, setViewMode]  = useState<'before' | 'dual' | 'after'>('dual');
+  // When lockedViewMode is set by the parent, ignore internal state. Story
+  // steps drive this so Step 1 always shows "before" only and Step 3
+  // always shows the dual side-by-side.
+  const viewMode = lockedViewMode ?? viewModeState;
 
   type CycleRecord = { cycle: number; peakBefore: number; peakAfter: number };
   const [cycleHistory, setCycleHistory] = useState<CycleRecord[]>([]);
@@ -1314,6 +1415,16 @@ export function DualIntersectionCanvas({
     const numActive = Math.max(active.size, 1);
     const perVol    = chunk.volume_pcu_hr / numActive;
     spawnIntervalsRef.current = Array(4).fill(Math.min(3600 / Math.max(perVol, 0.1), 30));
+
+    const arr = chunk.arrivals_per_second ?? null;
+    arrivalsByApproachRef.current = ids
+      .slice(0, 4)
+      .map(id => (arr ? arr[id] : undefined));
+    if (arr) {
+      ids.slice(0, 4).forEach((id, i) => {
+        if ((arr[id]?.length ?? 0) > 0) activeApproachesRef.current.add(i);
+      });
+    }
   }, [chunk, ids]);
 
   useEffect(() => {
@@ -1326,6 +1437,10 @@ export function DualIntersectionCanvas({
     prevCycleRef.current  = -1;
     peakBeforeRef.current = 0;
     peakAfterRef.current  = 0;
+    beforeCarryRef.current = [0, 0, 0, 0];
+    afterCarryRef.current  = [0, 0, 0, 0];
+    beforeLastSecRef.current = -1;
+    afterLastSecRef.current  = -1;
     setLiveQ({ before: 0, after: 0 });
     setCycleHistory([]);
   }, [chunk.chunk_name]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -1396,12 +1511,24 @@ export function DualIntersectionCanvas({
             : new Array(idsRef.current.length).fill(false);
           const mix     = idsRef.current.map(sid => typeMixRef.current[sid] ?? DEFAULT_TYPE_MIX);
 
-          spawnVehicles(beforeSim.current.vehicles, beforeSim.current.timers,
-            beforeSim.current.nextId, idsRef.current,
-            activeApproachesRef.current, spawnIntervalsRef.current, mix, step);
-          spawnVehicles(afterSim.current.vehicles, afterSim.current.timers,
-            afterSim.current.nextId, idsRef.current,
-            activeApproachesRef.current, spawnIntervalsRef.current, mix, step);
+          const hasSchedule = arrivalsByApproachRef.current.some(a => a && a.length > 0);
+          if (hasSchedule) {
+            spawnFromArrivals(beforeSim.current.vehicles, beforeSim.current.nextId,
+              idsRef.current, activeApproachesRef.current,
+              arrivalsByApproachRef.current, beforeCarryRef.current, beforeLastSecRef,
+              mix, subT + step);
+            spawnFromArrivals(afterSim.current.vehicles, afterSim.current.nextId,
+              idsRef.current, activeApproachesRef.current,
+              arrivalsByApproachRef.current, afterCarryRef.current, afterLastSecRef,
+              mix, subT + step);
+          } else {
+            spawnVehicles(beforeSim.current.vehicles, beforeSim.current.timers,
+              beforeSim.current.nextId, idsRef.current,
+              activeApproachesRef.current, spawnIntervalsRef.current, mix, step);
+            spawnVehicles(afterSim.current.vehicles, afterSim.current.timers,
+              afterSim.current.nextId, idsRef.current,
+              activeApproachesRef.current, spawnIntervalsRef.current, mix, step);
+          }
 
           stepPhysics(beforeSim.current.vehicles, step, greenB, !hasExisting, subT);
           stepPhysics(afterSim.current.vehicles,  step, greenA, gapAfter,     subT);
@@ -1465,6 +1592,10 @@ export function DualIntersectionCanvas({
     simTRef.current    = 0;
     frameRef.current   = 0;
     playingRef.current = !paused;
+    beforeCarryRef.current = [0, 0, 0, 0];
+    afterCarryRef.current  = [0, 0, 0, 0];
+    beforeLastSecRef.current = -1;
+    afterLastSecRef.current  = -1;
     setLiveQ({ before: 0, after: 0 });
   };
 
@@ -1474,7 +1605,6 @@ export function DualIntersectionCanvas({
   };
 
   const delayDiff = chunk.delay_before - chunk.delay_after;
-  const pesoSaved = chunk.vehicle_hours_saved * PESO_PER_VEH_HR;
   const qDiff     = liveQ.before - liveQ.after;
 
   return (
@@ -1575,7 +1705,7 @@ export function DualIntersectionCanvas({
       )}
 
       {/* Savings strip */}
-      <div className="grid grid-cols-3 gap-2">
+      <div className="grid grid-cols-2 gap-2">
         <div className="rounded-md border border-border bg-card px-3 py-2 text-center">
           <p className="text-[10px] text-muted-foreground uppercase tracking-wide">Delay saved</p>
           <p className="text-xl font-semibold tabular-nums mt-0.5">
@@ -1588,35 +1718,33 @@ export function DualIntersectionCanvas({
           <p className="text-xl font-semibold tabular-nums mt-0.5">{chunk.vehicle_hours_saved.toFixed(2)}</p>
           <p className="text-[10px] text-muted-foreground">this chunk</p>
         </div>
-        <div className="rounded-md border border-green-500/30 bg-card px-3 py-2 text-center">
-          <p className="text-[10px] text-muted-foreground uppercase tracking-wide">Est. savings</p>
-          <p className="text-xl font-semibold tabular-nums mt-0.5 text-green-500">
-            {pesoSaved > 0 ? `₱${Math.round(pesoSaved)}` : '-'}
-          </p>
-          <p className="text-[10px] text-muted-foreground">chunk · @₱{PESO_PER_VEH_HR}/veh-hr</p>
-        </div>
       </div>
 
-      {/* Controls: view toggle + reset + fullscreen */}
+      {/* Controls: view toggle + reset + fullscreen.
+          The view toggle hides when the parent has locked the view (e.g.
+          inside the story tab) so each step has one canonical visual. */}
       <div className="flex items-center gap-2 flex-wrap">
-        <div className="flex rounded-md border border-border overflow-hidden">
-          {(['before', 'dual', 'after'] as const).map(m => (
-            <button
-              key={m}
-              onClick={() => setViewMode(m)}
-              className={cn(
-                'px-2.5 py-1 text-xs font-medium transition-colors border-l first:border-l-0 border-border',
-                viewMode === m
-                  ? 'bg-primary text-primary-foreground'
-                  : 'text-muted-foreground hover:bg-muted',
-              )}
-            >
-              {m === 'dual' ? 'Both' : m.charAt(0).toUpperCase() + m.slice(1)}
-            </button>
-          ))}
-        </div>
-
-        <div className="h-5 w-px bg-border" />
+        {lockedViewMode === null && (
+          <>
+            <div className="flex rounded-md border border-border overflow-hidden">
+              {(['before', 'dual', 'after'] as const).map(m => (
+                <button
+                  key={m}
+                  onClick={() => setViewMode(m)}
+                  className={cn(
+                    'px-2.5 py-1 text-xs font-medium transition-colors border-l first:border-l-0 border-border',
+                    viewMode === m
+                      ? 'bg-primary text-primary-foreground'
+                      : 'text-muted-foreground hover:bg-muted',
+                  )}
+                >
+                  {m === 'dual' ? 'Both' : m.charAt(0).toUpperCase() + m.slice(1)}
+                </button>
+              ))}
+            </div>
+            <div className="h-5 w-px bg-border" />
+          </>
+        )}
 
         <Button size="sm" variant="ghost" className="size-8 p-0" title="Reset simulation" onClick={resetState}>
           <RotateCcw className="size-3.5" />
@@ -1631,6 +1759,12 @@ export function DualIntersectionCanvas({
           {isFullscreen ? <Minimize2 className="size-3.5" /> : <Maximize2 className="size-3.5" />}
         </Button>
       </div>
+
+      {!isFullscreen && (
+        <p className="text-[10px] text-amber-500/90">
+          Indicative playback. Queues are reconstructed from Webster's average delay, not a forecast of real arrivals.
+        </p>
+      )}
     </div>
   );
 }

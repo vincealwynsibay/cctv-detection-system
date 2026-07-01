@@ -12,6 +12,11 @@ export interface SimulationChunk {
   vehicle_hours_saved: number;
   queue_series_before: Record<string, number[]> | null;
   queue_series_after: Record<string, number[]> | null;
+  // Real per-second vehicle counts from `detection_street_view`, keyed by
+  // street_id. Only set by the on-demand `/simulation/compute` endpoint;
+  // when present, the canvas/3D playback spawns vehicles from this schedule
+  // instead of resampling Poisson from `volume_pcu_hr`.
+  arrivals_per_second?: Record<string, number[]> | null;
   generated_at: string;
   // Only present on historical (on-demand) results
   measured_flows?: Record<string, number> | null;
@@ -41,6 +46,36 @@ export interface SimulationResponse {
   window_end?: string;
 }
 
+export interface StochasticStatBlock {
+  mean: number;
+  std: number;
+  ci_low_95: number;
+  ci_high_95: number;
+  n_runs: number;
+}
+
+export interface StochasticApproachStats {
+  approach_id: number;
+  label: string;            // plain-English, e.g. "NB - Apokon Road"
+  flow_pcu_hr: number;
+  before: StochasticStatBlock;
+  after:  StochasticStatBlock;
+}
+
+export interface StochasticConfidenceResponse {
+  intersection_id: number;
+  chunk_name: string;
+  duration_sec: number;
+  n_runs: number;
+  label: 'high' | 'moderate' | 'marginal';
+  sentence: string;
+  vehicle_hours_saved: StochasticStatBlock;
+  per_run_means: number[];
+  per_approach: StochasticApproachStats[];
+  analytical_reference_vh: number;
+  cached: boolean;
+}
+
 export const simulationApi = {
   get: (intersectionId: number) =>
     request<SimulationResponse>(`/simulation/${intersectionId}`),
@@ -51,4 +86,11 @@ export const simulationApi = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
     }),
+
+  stochasticConfidence: (intersectionId: number, chunkName?: string) => {
+    const qs = chunkName ? `?chunk=${encodeURIComponent(chunkName)}` : '';
+    return request<StochasticConfidenceResponse>(
+      `/simulation/${intersectionId}/stochastic-confidence${qs}`,
+    );
+  },
 };

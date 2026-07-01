@@ -248,16 +248,66 @@ def get_cctvs(
     return cctvs
 
 
+def _simulated_onvif_scan(count: int, db: Session) -> list[DiscoveredCamera]:
+    """Prototype-only synthetic scan: `count` cameras starting at .31.
+
+    Returns the same IP layout a real city deployment uses - contiguous
+    blocks of four (one block per intersection). 20 cameras = 5
+    intersections; the operator can request more with `?count=`.
+
+    Picks the first 192.168.S.* subnet whose 31..30+count range is free
+    in the DB, so demo re-runs always surface fresh cameras instead of
+    showing "All discovered cameras are already in the system."
+
+    Sleeps ~2 seconds to mimic the time a real WS-Discovery multicast
+    probe takes - without it the spinner pops and disappears before the
+    operator can read it, which makes the demo feel fake.
+    """
+    import time
+    time.sleep(2.0)
+
+    ip_re = re.compile(r"rtsp://192\.168\.(\d+)\.(\d+)")
+    taken: dict[int, set[int]] = {}
+    for (url,) in db.query(CCTV.rtsp_url).all():
+        if not url:
+            continue
+        m = ip_re.match(url)
+        if m:
+            taken.setdefault(int(m.group(1)), set()).add(int(m.group(2)))
+
+    hosts = range(31, 31 + count)
+    subnet = next(
+        (s for s in range(1, 255) if not (taken.get(s, set()) & set(hosts))),
+        1,
+    )
+    return [
+        DiscoveredCamera(
+            address=f"192.168.{subnet}.{i}",
+            rtsp_url=f"rtsp://192.168.{subnet}.{i}:554/stream1",
+        )
+        for i in hosts
+    ]
+
+
 @router.get("/discover", response_model=list[DiscoveredCamera])
 @limiter.limit("6/minute")
 def discover_cameras(
     request: Request,
     user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    simulate: bool = False,
+    count: int = 20,
 ):
     """
     WS-Discovery scan for ONVIF cameras on the local network.
     Sends a UDP multicast probe and collects responses for 3 seconds.
+
+    When ``simulate=true`` (prototype demo path), bypasses the multicast
+    probe and returns a deterministic synthetic deployment instead.
+    Default 20 cameras (5 intersections of 4). Capped at 60.
     """
+    if simulate:
+        return _simulated_onvif_scan(max(4, min(count, 60)), db)
     return _discover_onvif_cameras()
 
 
@@ -328,10 +378,28 @@ def retry_camera(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> Response:
-    """Signal the worker to immediately retry the RTSP connection for this camera."""
+    """Signal the worker to immediately retry the RTSP connection for this camera.
+
+    Returns 409 if no worker currently holds this camera - the Redis signal
+    only wakes an in-flight reconnect backoff, so a retry against an
+    unclaimed camera would silently do nothing. Surface that to the caller
+    instead of returning 204 and lying via the toast.
+    """
+    from sqlalchemy import text as _text
     cctv = db.get(CCTV, cctv_id)
     if not cctv:
         raise HTTPException(status_code=404, detail="CCTV not found")
+
+    has_worker = db.execute(_text(
+        "SELECT 1 FROM worker_heartbeats "
+        "WHERE cctv_id = :id AND last_seen > NOW() - INTERVAL '15 seconds'"
+    ), {"id": cctv_id}).fetchone() is not None
+    if not has_worker:
+        raise HTTPException(
+            status_code=409,
+            detail="No worker is currently assigned to this camera - scale up workers or enable the camera before retrying.",
+        )
+
     if _redis is not None:
         try:
             _redis.setex(f"cam:{cctv_id}:retry_now", 60, "1")

@@ -1,0 +1,27 @@
+{
+  "_comment": "Curated UTD19 intersections for real-data CNN retraining (Day 2 of thesis sprint). Each entry maps one synthetic-equivalent intersection to a UTD19 city + four directional detector ids. Pick ~30 intersections with all four detectors available; mark missing approaches as null for 3-leg sites. The detector ids must match the values in UTD19's detectors_public.csv (TODO(utd19-cols): verify column name). Optional posted_speed_kph / is_signalized / n_approaches override the sampled Tagum-priors meta for that intersection (use when you actually know the value, e.g., from city signal databases).",
+  "intersections": [
+    {
+      "intersection_id": 0,
+      "city": "zurich",
+      "label": "Example: Bellevue x Quaibruecke",
+      "nb_detector": "REPLACE_WITH_DETID",
+      "sb_detector": "REPLACE_WITH_DETID",
+      "eb_detector": "REPLACE_WITH_DETID",
+      "wb_detector": "REPLACE_WITH_DETID",
+      "posted_speed_kph": 50,
+      "is_signalized": true,
+      "n_approaches": 4
+    },
+    {
+      "intersection_id": 1,
+      "city": "zurich",
+      "label": "Example: 3-leg T-intersection",
+      "nb_detector": "REPLACE_WITH_DETID",
+      "sb_detector": "REPLACE_WITH_DETID",
+      "eb_detector": "REPLACE_WITH_DETID",
+      "wb_detector": null,
+      "n_approaches": 3
+    }
+  ]
+}

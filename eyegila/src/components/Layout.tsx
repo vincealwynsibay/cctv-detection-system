@@ -3,6 +3,7 @@ import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { OnboardingWizard } from '@/components/OnboardingWizard';
 import { onboardingApi } from '@/services/onboarding';
 import { intersectionsApi } from '@/services/intersections';
+import { recommendationsApi, type RecommenderModelInfo } from '@/services/recommendations';
 import { useAuth } from '@/hooks/useAuth';
 import { useSSE, type SSEStatus } from '@/hooks/useSSE';
 import type { AggregationRow, Intersection } from '@/types';
@@ -15,18 +16,20 @@ import { Separator } from '@/components/ui/separator';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover';
+import { SetupProgressPopoverContent } from '@/components/SetupProgressPopover';
 import {
   BarChart3, MapPin, Users, LogOut,
-  Wifi, WifiOff, Loader2, ServerCrash, Video, Camera,
+  Wifi, WifiOff, Loader2, ServerCrash, Video, Camera, Cpu,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 const NAV_ITEMS = [
-  { to: '/',        label: 'Dashboard', icon: MapPin,    end: true },
-  { to: '/cameras', label: 'Cameras',   icon: Camera              },
-  { to: '/reports', label: 'Reports',   icon: BarChart3           },
-  { to: '/videos',  label: 'Videos',    icon: Video               },
-  { to: '/users',   label: 'Users',     icon: Users               },
+  { to: '/',        label: 'Dashboard', icon: MapPin,    end: true, hint: 'Live intersection health and warrant verdicts' },
+  { to: '/cameras', label: 'Cameras',   icon: Camera,               hint: 'Connect and assign cameras to approaches' },
+  { to: '/reports', label: 'Reports',   icon: BarChart3,            hint: 'Multi-intersection summary and CSV export' },
+  { to: '/videos',  label: 'Videos',    icon: Video,                hint: 'Upload archived footage to backfill counts' },
+  { to: '/users',   label: 'Users',     icon: Users,                hint: 'Manage operator accounts' },
 ];
 
 const SSE_INDICATOR: Record<SSEStatus, { icon: React.ReactNode; label: string; color: string; tip: string }> = {
@@ -35,6 +38,57 @@ const SSE_INDICATOR: Record<SSEStatus, { icon: React.ReactNode; label: string; c
   disconnected:  { icon: <WifiOff className="size-3 text-destructive" />,        label: 'Offline',       color: 'text-destructive',  tip: 'Stream dropped - retrying…'       },
   server_offline:{ icon: <ServerCrash className="size-3 text-destructive" />,    label: 'Server offline',color: 'text-destructive',  tip: 'Server unreachable - retrying…'   },
 };
+
+function RecommenderBadge({ info }: { info: RecommenderModelInfo | null }) {
+  // When info hasn't loaded yet we render nothing so the header doesn't flash.
+  // Once loaded, we always render — the badge is the panel-defense demo's
+  // single visible proof of which warrant CNN is currently in production.
+  if (!info) return null;
+  const variant = info.variant ?? (info.mode === 'scalar_baseline' ? 'fallback' : 'custom');
+  const label = (() => {
+    if (info.mode === 'scalar_baseline') return 'Scalar baseline';
+    if (variant === 'synthetic_baseline')   return 'Synthetic CNN';
+    if (variant === 'real_trained_toronto') return 'Real-trained CNN';
+    return 'Custom CNN';
+  })();
+  const tone = (() => {
+    if (info.mode === 'scalar_baseline')    return 'text-muted-foreground border-muted-foreground/20';
+    if (variant === 'real_trained_toronto') return 'text-emerald-600 border-emerald-500/40 bg-emerald-50/50';
+    if (variant === 'synthetic_baseline')   return 'text-amber-700 border-amber-500/40 bg-amber-50/50';
+    return 'text-blue-700 border-blue-500/40 bg-blue-50/50';
+  })();
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <div className={cn(
+          'flex items-center gap-1.5 px-2 py-1 rounded-md text-xs border',
+          tone,
+        )}>
+          <Cpu className="size-3" />
+          <span className="font-medium">{label}</span>
+        </div>
+      </TooltipTrigger>
+      <TooltipContent side="bottom" className="max-w-[320px]">
+        <div className="space-y-1 text-xs">
+          <div className="font-semibold">Recommender model</div>
+          {info.training_data_source && (
+            <div><span className="text-muted-foreground">Source:</span> {info.training_data_source}</div>
+          )}
+          {info.warrant_names && (
+            <div><span className="text-muted-foreground">Heads:</span> {info.warrant_names.length} warrants ({info.warrant_names.join(', ')})</div>
+          )}
+          {info.checkpoint_path && (
+            <div className="font-mono text-[10px] break-all opacity-70">{info.checkpoint_path}</div>
+          )}
+          {info.detail && (
+            <div className="text-muted-foreground">{info.detail}</div>
+          )}
+        </div>
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
 
 function SSEIndicator({ status }: { status: SSEStatus }) {
   const { icon, label, color, tip } = SSE_INDICATOR[status];
@@ -60,6 +114,8 @@ export function Layout() {
   const [wizardOpen,       setWizardOpen]       = useState(false);
   const [savedStep,        setSavedStep]        = useState<string | null>(null);
   const [intersectionList, setIntersectionList] = useState<Intersection[]>([]);
+  const [setupPopoverOpen, setSetupPopoverOpen] = useState(false);
+  const [recommenderInfo,  setRecommenderInfo]  = useState<RecommenderModelInfo | null>(null);
 
   function fetchIntersections() {
     intersectionsApi.list().then(setIntersectionList).catch(() => {});
@@ -67,6 +123,10 @@ export function Layout() {
 
   useEffect(() => {
     if (!token) return;
+    // Recommender info is fetched once per session and cached in state. The
+    // badge in the header is informational only, so a refresh-on-error /
+    // retry loop is unnecessary; if the endpoint fails we simply omit it.
+    recommendationsApi.modelInfo().then(setRecommenderInfo).catch(() => setRecommenderInfo(null));
     onboardingApi.getProgress()
       .then(p => setSavedStep(p.step))
       .catch(() => {});
@@ -108,7 +168,7 @@ export function Layout() {
 
           <SidebarContent className="py-2">
             <SidebarMenu>
-              {NAV_ITEMS.map(({ to, label, icon: Icon, end }) => (
+              {NAV_ITEMS.map(({ to, label, icon: Icon, end, hint }) => (
                 <SidebarMenuItem key={to}>
                   <NavLink
                     to={to}
@@ -117,7 +177,13 @@ export function Layout() {
                     data-testid={`nav-link-${label.toLowerCase()}`}
                   >
                     {({ isActive }) => (
-                      <SidebarMenuButton isActive={isActive} tooltip={label}>
+                      <SidebarMenuButton
+                        isActive={isActive}
+                        // hidden:false overrides the sidebar default that only
+                        // shows the tooltip when collapsed - new users need the
+                        // context even when the labels are visible.
+                        tooltip={{ children: hint, hidden: false, side: 'right' }}
+                      >
                         <Icon className="text-white" />
                         <span className="text-sm font-medium text-white">{label}</span>
                       </SidebarMenuButton>
@@ -134,33 +200,49 @@ export function Layout() {
               const total      = intersectionList.length;
               const pct        = Math.round((configured / total) * 100);
               return (
-                <button
-                  onClick={() => openWizard()}
-                  className="mx-3 mt-2 mb-2 rounded-md border border-white/20 bg-white/5 px-3 py-3 group-data-[collapsible=icon]:hidden w-[calc(100%-1.5rem)] text-left hover:bg-white/10 hover:border-white/40 transition-colors"
-                >
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-semibold text-white uppercase tracking-wide">
-                      Setup Progress
-                    </span>
-                    <span className="text-sm font-bold tabular-nums text-white">
-                      {configured}/{total}
-                    </span>
-                  </div>
-                  <div className="h-2 rounded-full bg-black/40 overflow-hidden border border-white/10">
-                    <div
-                      className={cn(
-                        'h-full rounded-full transition-all duration-500',
-                        pct === 100 ? 'bg-emerald-500' : 'bg-primary',
-                      )}
-                      style={{ width: `${pct}%` }}
+                <Popover open={setupPopoverOpen} onOpenChange={setSetupPopoverOpen}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <PopoverTrigger asChild>
+                        <button
+                          className="mx-3 mt-2 mb-2 rounded-md border border-white/20 bg-white/5 px-3 py-3 group-data-[collapsible=icon]:hidden w-[calc(100%-1.5rem)] text-left hover:bg-white/10 hover:border-white/40 transition-colors"
+                        >
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="text-xs font-semibold text-white uppercase tracking-wide">
+                              Setup Progress
+                            </span>
+                            <span className="text-sm font-bold tabular-nums text-white">
+                              {configured}/{total}
+                            </span>
+                          </div>
+                          <div className="h-2 rounded-full bg-black/40 overflow-hidden border border-white/10">
+                            <div
+                              className={cn(
+                                'h-full rounded-full transition-all duration-500',
+                                pct === 100 ? 'bg-emerald-500' : 'bg-primary',
+                              )}
+                              style={{ width: `${pct}%` }}
+                            />
+                          </div>
+                          <p className="text-xs font-medium text-white/80 mt-2">
+                            {configured === total
+                              ? 'All intersections configured'
+                              : `${total - configured} pending timing setup`}
+                          </p>
+                        </button>
+                      </PopoverTrigger>
+                    </TooltipTrigger>
+                    <TooltipContent side="right">Click to resume setup or dismiss pending tasks</TooltipContent>
+                  </Tooltip>
+                  <PopoverContent side="right" align="start" className="w-80">
+                    <SetupProgressPopoverContent
+                      intersections={intersectionList}
+                      onOpenWizard={openWizard}
+                      onIntersectionsChanged={fetchIntersections}
+                      onClose={() => setSetupPopoverOpen(false)}
                     />
-                  </div>
-                  <p className="text-xs font-medium text-white/80 mt-2">
-                    {configured === total
-                      ? 'All intersections configured'
-                      : `${total - configured} pending timing setup`}
-                  </p>
-                </button>
+                  </PopoverContent>
+                </Popover>
               );
             })()}
           </SidebarContent>
@@ -189,6 +271,10 @@ export function Layout() {
             <SidebarTrigger className="size-7" />
             <Separator orientation="vertical" className="h-4" />
             <div className="flex-1" />
+            {/* RecommenderBadge intentionally removed from the header (the
+                model identity is operator-irrelevant). The component is
+                still defined above and can be re-added if needed for a
+                panel demo without rebuilding the data hook. */}
             <SSEIndicator status={sseStatus} />
           </header>
 

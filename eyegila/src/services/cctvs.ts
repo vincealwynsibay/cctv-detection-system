@@ -52,6 +52,13 @@ export const cctvsApi = {
       body: JSON.stringify(data),
     }),
 
-  discover: () =>
-    request<{ address: string; rtsp_url: string | null; xaddrs: string[] }[]>('/cctvs/discover'),
+  discover: (opts?: { simulate?: boolean; count?: number }) => {
+    const qs = new URLSearchParams();
+    if (opts?.simulate) qs.set('simulate', 'true');
+    if (opts?.count != null) qs.set('count', String(opts.count));
+    const suffix = qs.toString() ? `?${qs}` : '';
+    return request<{ address: string; rtsp_url: string | null; xaddrs: string[] }[]>(
+      `/cctvs/discover${suffix}`,
+    );
+  },
 };
