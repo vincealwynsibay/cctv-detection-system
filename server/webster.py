@@ -123,6 +123,15 @@ def vehicle_arrivals_per_second_for_window(
     as 1 vehicle (no PCE weighting). Used to drive playback animations so the
     canvas/3D scene spawns vehicles at their actual arrival timestamps.
     """
+    # `row.time` comes back from a timestamptz column as tz-aware; if the
+    # caller passes naive datetimes (FastAPI parses naive ISO strings that
+    # way), the subtraction below blows up. Promote to UTC at the boundary,
+    # matching the convention pcu_flow_for_window already uses.
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
+
     n_seconds = max(0, int((end - start).total_seconds()))
     if n_seconds == 0:
         return {}
@@ -169,6 +178,13 @@ def arrivals_per_second_for_window(
     instead of a Poisson reconstruction from aggregate flow. The same direction
     and object-type filters as `pcu_flow_for_window` apply.
     """
+    # See vehicle_arrivals_per_second_for_window for why naive datetimes
+    # get promoted to UTC here. `row.time` comes back tz-aware.
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
+
     n_seconds = max(0, int((end - start).total_seconds()))
     if n_seconds == 0:
         return {}

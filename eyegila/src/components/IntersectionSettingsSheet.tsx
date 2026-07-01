@@ -5,6 +5,8 @@ import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { toast } from 'sonner';
 import { intersectionsApi, type DetectTimingResult } from '@/services/intersections';
+import { simulationApi, type SimulationResponse } from '@/services/simulation';
+import { selectPeakChunk } from '@/lib/simulation';
 import { streetsApi } from '@/services/streets';
 import { cctvsApi } from '@/services/cctvs';
 import { recommendationsApi, type RecommendationResponse } from '@/services/recommendations';
@@ -108,11 +110,16 @@ export function SettingsSheet({ inter, streets, cameras, rec, open, onClose, onR
   const [name, setName]   = useState('');
   const [lat, setLat]     = useState('');
   const [lng, setLng]     = useState('');
-  const [signalStatus, setSignalStatus] = useState<SignalStatus>('unsignalized');
-  const [cycleLen, setCycleLen]         = useState('');
-  const [saving, setSaving]             = useState(false);
+  const [signalStatus, setSignalStatus]   = useState<SignalStatus>('unsignalized');
+  const [cycleLen, setCycleLen]           = useState('');
+  const [splits, setSplits]               = useState<Record<number, string>>({});
+  const [saving, setSaving]               = useState(false);
+  // Auto-detect cycle length from camera feed.
   const [detectingTiming, setDetectingTiming] = useState(false);
-  const [detectResult, setDetectResult]       = useState<DetectTimingResult | null>(null);
+  const [detectResult, setDetectResult]   = useState<DetectTimingResult | null>(null);
+  // Peak chunk from the latest sim, used to populate the "Use recommendation"
+  // shortcut. Fetched on-demand when the sheet opens and signalised.
+  const [latestSim, setLatestSim]         = useState<SimulationResponse | null>(null);
   const [stagingDirs, setStagingDirs]   = useState<Record<number, string>>({});
   const [newCamName, setNewCamName]   = useState('');
   const [newCamRtsp, setNewCamRtsp]   = useState('');
@@ -128,10 +135,30 @@ export function SettingsSheet({ inter, streets, cameras, rec, open, onClose, onR
       setLng(String(inter.longitude ?? ''));
       setSignalStatus(inter.signal_status ?? 'unsignalized');
       setCycleLen(inter.existing_cycle_length != null ? String(inter.existing_cycle_length) : '');
-      setDetectResult(null);
+      // Pre-fill per-approach splits from the saved value (or evenly split
+      // the cycle as a starting hint when no value is stored yet).
+      const cycle = inter.existing_cycle_length ?? 90;
+      const defaultGreen = Math.round(cycle / Math.max(streets.length, 1));
+      const initSplits: Record<number, string> = {};
+      for (const s of streets) {
+        const stored = (inter.existing_green_splits as Record<string, number> | null)?.[String(s.id)];
+        initSplits[s.id] = String(stored ?? defaultGreen);
+      }
+      setSplits(initSplits);
       setStagingDirs({});
+      setDetectResult(null);
     }
-  }, [inter]);
+  }, [inter, streets]);
+
+  // Fetch latest sim once the sheet opens so the "Use recommendation"
+  // shortcut has a Webster proposal to copy from. Skipped when the
+  // intersection isn't signalised (nothing to apply).
+  useEffect(() => {
+    if (!inter || !open) return;
+    const isSig = inter.signal_status === 'fixed_time' || inter.signal_status === 'actuated';
+    if (!isSig) { setLatestSim(null); return; }
+    simulationApi.get(inter.id).then(setLatestSim).catch(() => setLatestSim(null));
+  }, [inter, open]);
 
   const hasUnsavedDirs = Object.keys(stagingDirs).length > 0;
 
@@ -142,11 +169,30 @@ export function SettingsSheet({ inter, streets, cameras, rec, open, onClose, onR
       const dirUpdates = Object.entries(stagingDirs).map(([sid, dir]) =>
         streetsApi.update(Number(sid), { arm_direction: dir as Street['arm_direction'] })
       );
+      // Settings is now the single editor for the intersection: metadata,
+      // signal type + timing, street directions, and (in its own UI) cameras.
+      // Building the splits payload only when signalised keeps the patch
+      // small for the common unsignalised case.
+      const greenSplits =
+        signalStatus !== 'unsignalized' && Object.keys(splits).length > 0
+          ? Object.fromEntries(
+              Object.entries(splits)
+                .map(([sid, v]) => [sid, parseInt(v, 10)])
+                .filter(([, v]) => Number.isFinite(v as number) && (v as number) > 0)
+            )
+          : null;
       await Promise.all([
-        intersectionsApi.update(inter.id, { name: name.trim(), latitude: parseFloat(lat) || 0, longitude: parseFloat(lng) || 0 }),
+        intersectionsApi.update(inter.id, {
+          name: name.trim(),
+          latitude:  parseFloat(lat) || 0,
+          longitude: parseFloat(lng) || 0,
+        }),
         intersectionsApi.patchTiming(inter.id, {
           signal_status: signalStatus,
-          existing_cycle_length: cycleLen ? parseInt(cycleLen) : null,
+          existing_cycle_length: signalStatus !== 'unsignalized' && cycleLen
+            ? parseInt(cycleLen, 10)
+            : null,
+          existing_green_splits: greenSplits,
         }),
         ...dirUpdates,
       ]);
@@ -160,7 +206,7 @@ export function SettingsSheet({ inter, streets, cameras, rec, open, onClose, onR
     }
   }
 
-  async function detect() {
+  async function detectTiming() {
     if (!inter) return;
     setDetectingTiming(true);
     try {
@@ -177,6 +223,22 @@ export function SettingsSheet({ inter, streets, cameras, rec, open, onClose, onR
     } finally {
       setDetectingTiming(false);
     }
+  }
+
+  function fillFromRecommendation() {
+    const peak = selectPeakChunk(latestSim);
+    if (!peak || peak.proposed_cycle_s == null || !peak.proposed_splits) {
+      toast.error('No recommendation available yet');
+      return;
+    }
+    setCycleLen(String(Math.round(peak.proposed_cycle_s)));
+    const next: Record<number, string> = { ...splits };
+    for (const s of streets) {
+      const v = peak.proposed_splits[String(s.id)];
+      if (v != null) next[s.id] = String(Math.round(v as number));
+    }
+    setSplits(next);
+    toast.success(`Loaded Webster proposal (${peak.chunk_name})`);
   }
 
   async function deleteStreet(street: Street) {
@@ -250,14 +312,15 @@ export function SettingsSheet({ inter, streets, cameras, rec, open, onClose, onR
             <SheetTitle className="text-base">{inter.name}</SheetTitle>
           </SheetHeader>
           <div className="flex items-center gap-3 mt-3 flex-wrap">
+            {/* signal_status badge dropped - the shell header already shows
+                it and the sheet covers the right side of the screen, so the
+                two badges sat side by side saying the same thing. The bucket
+                badge stays (only shown here, useful warrant context). */}
             {bucket && (
               <Badge variant="outline" className={cn('text-[10px]', BUCKET_BADGE_CLASS[bucket])}>
                 {BUCKET_LABEL[bucket]}
               </Badge>
             )}
-            <Badge variant="secondary" className="text-[10px]">
-              {inter.signal_status.replace('_', ' ')}
-            </Badge>
             <span className="text-xs text-muted-foreground">
               {onlineCount}/{cameras.length} cameras online
             </span>
@@ -312,9 +375,14 @@ export function SettingsSheet({ inter, streets, cameras, rec, open, onClose, onR
 
           <Separator />
 
-          {/* Signal */}
+          {/* Signal & timing - the single editor for "what kind of signal
+              and how it runs". Replaces the separate Edit timing dialog on
+              the Timing tab so there's only one path to change these fields. */}
           <div className="flex flex-col gap-3">
-            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Signal timing</p>
+            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              Signal &amp; timing
+            </p>
+
             <div className="flex flex-col gap-1.5">
               <Label className="text-xs">Signal status</Label>
               <Select value={signalStatus} onValueChange={v => setSignalStatus(v as SignalStatus)}>
@@ -324,23 +392,92 @@ export function SettingsSheet({ inter, streets, cameras, rec, open, onClose, onR
                 </SelectContent>
               </Select>
             </div>
+
             {signalStatus !== 'unsignalized' && (
-              <div className="flex flex-col gap-1.5">
-                <Label className="text-xs">Current cycle length (seconds)</Label>
-                <div className="flex gap-2">
-                  <Input
-                    type="number" min={0} placeholder="e.g. 90"
-                    value={cycleLen} onChange={e => setCycleLen(e.target.value)}
-                    className="h-8 text-sm flex-1"
-                  />
-                  <Button size="sm" variant="outline" className="h-8 px-2 shrink-0" onClick={detect} disabled={detectingTiming} title="Detect from camera feed">
-                    {detectingTiming ? <Loader2 className="size-3.5 animate-spin" /> : <ScanSearch className="size-3.5" />}
-                  </Button>
+              <>
+                {/* Use-recommendation shortcut - one click to copy the peak
+                    chunk's Webster proposal into the form below. Pulls from
+                    the latest sim (peak vh-saved chunk). */}
+                {(() => {
+                  const peak = selectPeakChunk(latestSim);
+                  if (!peak || peak.proposed_cycle_s == null || !peak.proposed_splits) return null;
+                  return (
+                    <button
+                      type="button"
+                      onClick={fillFromRecommendation}
+                      className="flex items-start gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-left text-xs hover:bg-emerald-100 transition-colors dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:hover:bg-emerald-950/50"
+                      title="Copy Webster's proposal for the peak chunk into the form"
+                    >
+                      <RefreshCw className="size-3.5 mt-0.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                      <div className="flex-1 min-w-0">
+                        <p className="font-medium text-emerald-900 dark:text-emerald-200">
+                          Use recommendation · {peak.chunk_name}
+                        </p>
+                        <p className="mt-0.5 text-[11px] text-emerald-700/80 dark:text-emerald-400/80">
+                          {Math.round(peak.proposed_cycle_s)}s cycle, Webster splits
+                        </p>
+                      </div>
+                    </button>
+                  );
+                })()}
+
+                <div className="flex flex-col gap-1.5">
+                  <Label className="text-xs" htmlFor="settings-cycle">Cycle length (seconds)</Label>
+                  <div className="flex gap-2">
+                    <Input
+                      id="settings-cycle"
+                      type="number"
+                      min={20}
+                      max={180}
+                      value={cycleLen}
+                      onChange={e => setCycleLen(e.target.value)}
+                      placeholder="e.g. 90"
+                      className="h-8 text-sm flex-1"
+                    />
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-8 px-2 shrink-0"
+                      onClick={detectTiming}
+                      disabled={detectingTiming || !inter}
+                      title="Detect cycle length from camera feed"
+                    >
+                      {detectingTiming
+                        ? <Loader2 className="size-3.5 animate-spin" />
+                        : <ScanSearch className="size-3.5" />}
+                    </Button>
+                  </div>
+                  {detectResult && (
+                    <p className="text-[11px] text-muted-foreground">
+                      {detectResult.confidence} confidence · {detectResult.note}
+                    </p>
+                  )}
                 </div>
-                {detectResult && (
-                  <p className="text-xs text-muted-foreground">{detectResult.confidence} confidence · {detectResult.note}</p>
+
+                {streets.length > 0 && (
+                  <div className="flex flex-col gap-2">
+                    <Label className="text-xs">Green time per approach (seconds)</Label>
+                    {streets.map(s => (
+                      <div key={s.id} className="flex items-center gap-2">
+                        <span className="text-xs text-muted-foreground w-24 shrink-0 truncate capitalize">
+                          {s.arm_direction !== 'unknown' ? s.arm_direction : s.name}
+                        </span>
+                        <Input
+                          type="number"
+                          min={5}
+                          max={120}
+                          value={splits[s.id] ?? ''}
+                          onChange={e => setSplits(prev => ({ ...prev, [s.id]: e.target.value }))}
+                          placeholder="e.g. 22"
+                          className="h-8 text-sm"
+                        />
+                        <span className="text-xs text-muted-foreground shrink-0">s</span>
+                      </div>
+                    ))}
+                  </div>
                 )}
-              </div>
+              </>
             )}
           </div>
 

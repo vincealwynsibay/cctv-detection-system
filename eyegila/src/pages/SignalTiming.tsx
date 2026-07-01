@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid,
@@ -12,48 +12,25 @@ import { intersectionsApi } from '@/services/intersections';
 import { recommendationsApi, type RecommendationResponse } from '@/services/recommendations';
 import { IntersectionSummary } from '@/components/IntersectionSummary';
 import { ARM_SHORT, GanttDiagram, LosBadge } from '@/components/signal-timing-viz';
+import { ConfidenceBadge } from '@/components/ConfidenceBadge';
+import { useIntersectionShell } from '@/components/IntersectionShell';
 import { selectPeakChunk } from '@/lib/simulation';
-import type { SignalTimingPayload } from '@/services/intersections';
 import { DualIntersectionCanvas, type VehicleType, type TypeFractions } from '@/components/IntersectionCanvas';
 import { IntersectionScene3D } from '@/components/IntersectionScene3D';
 import type { AggregationRow, Street, Intersection } from '@/types';
-import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table';
 import {
-  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger, DialogFooter,
+  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger,
 } from '@/components/ui/dialog';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { TrendingDown, Printer, Play, Pause, Columns2, MonitorPlay, X, Pencil, History, Loader2, FlaskConical, RefreshCw, Info } from 'lucide-react';
+import { TrendingDown, Play, Pause, Columns2, MonitorPlay, X, Info } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
 import { JargonTip } from '@/components/JargonTip';
 import { deriveIntersectionAction, MONITOR_THRESHOLD_VH } from '@/lib/intersectionAction';
 
-// Mirrors TOD_DEFAULTS in Intersections.tsx and server/tod.py so clicking a
-// period pill can populate the "Analyse a specific window" inputs with the
-// chunk's wall-clock bounds. Keep in sync with the other two definitions.
-const TOD_CHUNK_BOUNDS: Record<string, { startMin: number; endMin: number }> = {
-  Overnight:  { startMin:    0, endMin:  360 },
-  'AM Rush':  { startMin:  360, endMin:  540 },
-  Midday:     { startMin:  540, endMin:  720 },
-  'PM Rush':  { startMin:  720, endMin: 1080 },
-  Evening:    { startMin: 1080, endMin: 1440 },
-};
-
-/** Build a datetime-local input value (YYYY-MM-DDTHH:MM, naive local time) for
- *  today at the given minute-of-day. Returns '' for end of day (1440), which
- *  becomes "tomorrow 00:00" so the window covers Evening's 18:00–24:00. */
-function todayAtMinute(min: number): string {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  d.setMinutes(min);
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
 
 const OBJECT_TO_VEHICLE: Record<string, VehicleType> = {
   motorcycle: 'MC', pedicab: 'MC', tricycle: 'MC', bicycle: 'MC',
@@ -149,405 +126,19 @@ function ChunkQueueChart({ chunk }: { chunk: SimulationChunk }) {
 }
 
 
-// ── Traffic timeline picker ──────────────────────────────────────────────────
-
-function pad2(n: number) { return String(n).padStart(2, '0'); }
-
-function barGradient(count: number, max: number): string {
-  if (count === 0) return 'none';
-  const r = count / max;
-  if (r < 0.33) return 'linear-gradient(to top, #14532d, #4ade80)';
-  if (r < 0.66) return 'linear-gradient(to top, #78350f, #fbbf24)';
-  if (r < 0.85) return 'linear-gradient(to top, #7c2d12, #fb923c)';
-  return                'linear-gradient(to top, #7f1d1d, #f87171)';
-}
-
-interface TrafficTimelineProps {
-  intersectionId: number;
-  onRange: (start: string, end: string, vph: number) => void;
-}
-
-function TrafficTimeline({ intersectionId, onRange }: TrafficTimelineProps) {
-  const today = new Date().toISOString().slice(0, 10);
-  const [date, setDate]           = useState(today);
-  const [bars, setBars]           = useState<{ hour: number; count: number }[]>([]);
-  const [tlLoading, setTlLoading] = useState(false);
-  const [selA, setSelA]           = useState<number | null>(null);
-  const [selB, setSelB]           = useState<number | null>(null);
-  const [anchor, setAnchor]       = useState<number | null>(null);
-  const [dragging, setDragging]   = useState(false);
-  const [hovered, setHovered]     = useState<number | null>(null);
-  const containerRef              = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    setTlLoading(true);
-    const next = new Date(date + 'T12:00:00');
-    next.setDate(next.getDate() + 1);
-    const end = next.toISOString().slice(0, 10) + 'T00:00:00';
-    aggregationApi.history({ start: date + 'T00:00:00', end, intersection_id: intersectionId, bucket: 'hour' })
-      .then(rows => {
-        const byHour: Record<number, number> = {};
-        for (const r of rows) {
-          if (r.object_type === 'pedestrian' || r.object_type === 'person') continue;
-          const h = new Date(r.window_start).getHours();
-          byHour[h] = (byHour[h] ?? 0) + r.count;
-        }
-        setBars(Array.from({ length: 24 }, (_, h) => ({ hour: h, count: byHour[h] ?? 0 })));
-      })
-      .catch(() => setBars(Array.from({ length: 24 }, (_, h) => ({ hour: h, count: 0 }))))
-      .finally(() => setTlLoading(false));
-  }, [date, intersectionId]);
-
-  function shiftDate(days: number) {
-    const d = new Date(date + 'T12:00:00');
-    d.setDate(d.getDate() + days);
-    const s = d.toISOString().slice(0, 10);
-    if (s > today) return;
-    setDate(s); setSelA(null); setSelB(null);
-  }
-
-  function hourFromClientX(x: number): number {
-    if (!containerRef.current) return 0;
-    const rect = containerRef.current.getBoundingClientRect();
-    return Math.max(0, Math.min(23, Math.floor(((x - rect.left) / rect.width) * 24)));
-  }
-
-  function applySelection(a: number, b: number) {
-    const h1 = Math.min(a, b);
-    const h2 = Math.max(a, b);
-    setSelA(h1); setSelB(h2);
-    // When h2 = 23 the end hour wraps to midnight of the NEXT calendar day.
-    // T24:00 is technically ISO 8601 but the JS Date() constructor handles it
-    // inconsistently across engines, so we always stay within HH 00–23.
-    let endStr: string;
-    if (h2 + 1 < 24) {
-      endStr = `${date}T${pad2(h2 + 1)}:00`;
-    } else {
-      // Advance date by 1 using T12:00:00 to stay in local-noon, safely clear of DST boundaries.
-      const next = new Date(date + 'T12:00:00');
-      next.setDate(next.getDate() + 1);
-      endStr = next.toISOString().slice(0, 10) + 'T00:00';
-    }
-    const total = bars.slice(h1, h2 + 1).reduce((s, b) => s + b.count, 0);
-    const hours = h2 - h1 + 1;
-    const vph = hours > 0 ? total / hours : 0;
-    onRange(`${date}T${pad2(h1)}:00`, endStr, vph);
-  }
-
-  function onPointerDown(e: React.PointerEvent<HTMLDivElement>) {
-    e.currentTarget.setPointerCapture(e.pointerId);
-    const h = hourFromClientX(e.clientX);
-    setAnchor(h); setSelA(h); setSelB(h); setDragging(true);
-  }
-  function onPointerMove(e: React.PointerEvent<HTMLDivElement>) {
-    const h = hourFromClientX(e.clientX);
-    setHovered(h);
-    if (dragging && anchor !== null) { setSelA(Math.min(anchor, h)); setSelB(Math.max(anchor, h)); }
-  }
-  function onPointerUp(e: React.PointerEvent<HTMLDivElement>) {
-    if (anchor !== null) {
-      const h = hourFromClientX(e.clientX);
-      applySelection(anchor, h);
-    }
-    setDragging(false);
-  }
-
-  const maxCount = Math.max(1, ...bars.map(b => b.count));
-  const peakHour = bars.reduce((best, b) => b.count > (bars[best]?.count ?? 0) ? b.hour : best, 0);
-  const selCount = selA !== null && selB !== null
-    ? bars.slice(selA, selB + 1).reduce((s, b) => s + b.count, 0)
-    : 0;
-
-  function selectPreset(h1: number, h2: number) { applySelection(h1, h2 - 1); }
-  function selectPeakHour() {
-    const a = Math.max(0, peakHour - 1);
-    const b = Math.min(23, peakHour + 1);
-    applySelection(a, b);
-  }
-
-  // Range used by the "Peak hour" preset, so its chip can show the same
-  // HH–HH hint format the other presets use.
-  const peakRange: [number, number] = [Math.max(0, peakHour - 1), Math.min(24, peakHour + 2)];
-  const peakActive = bars[peakHour]?.count > 0 && selA === peakRange[0] && selB === peakRange[1] - 1;
-
-  return (
-    <div className="flex flex-col gap-2.5">
-      {/* TOD-chunk presets - the primary way to pick a window. One click fills
-          the range with a system-defined period (Overnight / AM Rush / Midday
-          / PM Rush / Evening), matching the chunks the recommendation engine
-          and per-chunk filter row use further down. "Peak hour" picks the
-          busiest hour ± 1 from today's bar data. Each chip shows its HH-HH
-          hint so the operator doesn't have to remember the bounds. */}
-      <div className="flex flex-wrap items-center gap-1.5">
-        <span className="text-[10px] uppercase tracking-wide font-semibold text-muted-foreground mr-0.5">
-          Preset
-        </span>
-        <button type="button" onClick={selectPeakHour}
-          disabled={!bars[peakHour]?.count}
-          title={bars[peakHour]?.count ? `Peak hour ± 1 (${pad2(peakRange[0])}:00–${pad2(peakRange[1])}:00)` : 'No traffic data for this date'}
-          className={cn(
-            'h-8 px-2.5 text-[11px] rounded-md border transition-all font-medium flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed',
-            peakActive
-              ? 'border-amber-500 bg-amber-100 text-amber-800 dark:bg-amber-900/50 dark:text-amber-200 dark:border-amber-600 shadow-sm'
-              : 'border-amber-400/60 text-amber-700 dark:text-amber-300 bg-amber-50/70 dark:bg-amber-950/30 hover:bg-amber-100 dark:hover:bg-amber-900/40',
-          )}>
-          <span className="text-[10px]">▲</span>
-          <span>Peak hour</span>
-          {bars[peakHour]?.count > 0 && (
-            <span className="font-mono tabular-nums opacity-70 text-[10px]">
-              {pad2(peakRange[0])}–{pad2(peakRange[1])}
-            </span>
-          )}
-        </button>
-        {([
-          ['Overnight', 0,  6],
-          ['AM Rush',   6,  9],
-          ['Midday',    9, 12],
-          ['PM Rush',  12, 18],
-          ['Evening',  18, 24],
-          ['Full day',  0, 24],
-        ] as const).map(([label, h1, h2]) => {
-          const active = selA === h1 && selB === h2 - 1;
-          return (
-            <button key={label} type="button" onClick={() => selectPreset(h1, h2)}
-              title={`${label} · ${pad2(h1)}:00–${pad2(h2)}:00`}
-              className={cn(
-                'h-8 px-2.5 text-[11px] rounded-md border transition-all font-medium flex items-center gap-1.5',
-                active
-                  ? 'border-teal-500 bg-teal-100 text-teal-800 dark:bg-teal-900/50 dark:text-teal-200 dark:border-teal-600 shadow-sm'
-                  : 'border-border bg-card text-foreground/80 hover:bg-muted hover:border-foreground/30',
-              )}>
-              <span>{label}</span>
-              <span className="font-mono tabular-nums opacity-60 text-[10px]">
-                {pad2(h1)}–{pad2(h2)}
-              </span>
-            </button>
-          );
-        })}
-      </div>
-
-      {/* Date row - the secondary control. Lives below the presets so the
-          primary action (pick a chunk) reads first. */}
-      <div className="flex items-center gap-2 flex-wrap text-[10px]">
-        <span className="uppercase tracking-wide font-semibold text-muted-foreground">
-          Day
-        </span>
-        <div className="flex items-center gap-1">
-          <button type="button" onClick={() => shiftDate(-1)}
-            title="Previous day"
-            className="size-7 flex items-center justify-center rounded border border-border text-muted-foreground hover:bg-muted transition-colors text-base leading-none">
-            ‹
-          </button>
-          <input type="date" value={date} max={today}
-            onChange={e => { setDate(e.target.value); setSelA(null); setSelB(null); }}
-            className="h-7 text-xs px-2 rounded border border-input bg-background font-mono focus:outline-none focus:ring-1 focus:ring-ring"
-          />
-          <button type="button" onClick={() => shiftDate(1)} disabled={date >= today}
-            title="Next day"
-            className="size-7 flex items-center justify-center rounded border border-border text-muted-foreground hover:bg-muted transition-colors text-base leading-none disabled:opacity-30">
-            ›
-          </button>
-        </div>
-        {tlLoading && <span className="text-muted-foreground animate-pulse ml-1">loading…</span>}
-      </div>
-
-      {/* Y-axis caption above the chart - kept on its own row so it can't
-          collide with the controls row or the y-axis gutter. */}
-      <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
-        <span>↑ Vehicles per hour (vph)</span>
-        <JargonTip term="vph" size={11} />
-      </div>
-
-      {/* Chart layout: y-axis labels live in a normal-colored gutter to the
-          left of the dark canvas (high contrast, not washed out behind bars),
-          and every hour 1..24 gets its own tick under the x-axis. The dark
-          canvas is the pointer target, so hour-from-clientX math stays clean. */}
-      <div className="flex items-stretch gap-2">
-        {/* Y-axis gutter. Sits outside the dark waveform on the card background
-            so labels read as regular text instead of fighting bar gradients. */}
-        <div className="relative shrink-0 w-9" style={{ height: 140 }}>
-          {(() => {
-            // Bars span the top 88% of the 140px canvas (12% top padding for
-            // the gradient highlight), with 24px reserved at the bottom for the
-            // hour axis. Convert that bar zone into the y-tick coordinates.
-            const bottomReservedPct = (24 / 140) * 100;
-            const barTopPct = 12;
-            const barBottomPct = 100 - bottomReservedPct;
-            const ticks: { value: number; topPct: number }[] = [
-              { value: maxCount,                 topPct: barTopPct },
-              { value: Math.round(maxCount / 2), topPct: (barTopPct + barBottomPct) / 2 },
-              { value: 0,                        topPct: barBottomPct },
-            ];
-            return ticks.map((t, i) => (
-              <div
-                key={i}
-                className="absolute right-1 text-[11px] text-muted-foreground font-mono tabular-nums"
-                style={{ top: `${t.topPct}%`, transform: 'translateY(-50%)' }}
-              >
-                {t.value.toLocaleString()}
-              </div>
-            ));
-          })()}
-        </div>
-
-      {/* Waveform - the dark canvas. containerRef points here so pointer-hour
-          math (x within the bar area / width * 24) remains correct after the
-          y-axis was moved out. */}
-      <div
-        ref={containerRef}
-        className="relative flex-1 rounded-lg overflow-hidden border border-border select-none"
-        style={{ height: 140, background: '#070d19', cursor: dragging ? 'col-resize' : 'crosshair', touchAction: 'none' }}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerLeave={() => { setDragging(false); setHovered(null); }}
-      >
-        {/* Empty-state overlay - shown when the day has no detections at all.
-            Without this the bars all stub at the floor and operators don't
-            know whether the page is broken or the day was genuinely quiet. */}
-        {!tlLoading && bars.every(b => b.count === 0) && (
-          <div className="absolute inset-0 bottom-6 flex flex-col items-center justify-center gap-1 text-white/60 pointer-events-none z-10">
-            <span className="text-xs font-medium">No detections recorded for this day</span>
-            <span className="text-[10px] text-white/40">Try an earlier date with the arrows above</span>
-          </div>
-        )}
-
-        {/* Subtle vertical grid lines at 6h */}
-        {[6, 12, 18].map(h => (
-          <div key={h} className="absolute top-0 bottom-6 w-px bg-white/[0.06]"
-            style={{ left: `${(h / 24) * 100}%` }} />
-        ))}
-
-        {/* Horizontal y-grid lines at each tick row so the bar tops line up
-            with the y-axis labels on the left. */}
-        {[0.12, 0.56, 0.857].map((topFrac, i) => (
-          <div key={i} className="absolute inset-x-0 h-px bg-white/[0.08] pointer-events-none"
-            style={{ top: `${topFrac * 100}%` }} />
-        ))}
-
-        {/* Selection overlay + handles */}
-        {selA !== null && selB !== null && (
-          <>
-            <div className="absolute top-0 bottom-6 bg-teal-400/[0.08] pointer-events-none"
-              style={{ left: `${(selA / 24) * 100}%`, width: `${((selB - selA + 1) / 24) * 100}%` }} />
-            <div className="absolute top-0 bottom-6 w-0.5 bg-teal-400/80 pointer-events-none"
-              style={{ left: `${(selA / 24) * 100}%` }} />
-            <div className="absolute top-0 bottom-6 w-0.5 bg-teal-400/80 pointer-events-none"
-              style={{ left: `${((selB + 1) / 24) * 100}%` }} />
-            {/* Handle tabs */}
-            <div className="absolute top-2 w-1 h-6 rounded-sm bg-teal-400 pointer-events-none"
-              style={{ left: `calc(${(selA / 24) * 100}% - 2px)` }} />
-            <div className="absolute top-2 w-1 h-6 rounded-sm bg-teal-400 pointer-events-none"
-              style={{ left: `calc(${((selB + 1) / 24) * 100}% + 1px)` }} />
-          </>
-        )}
-
-        {/* Bars */}
-        <div className="absolute inset-x-0 bottom-6 top-0 flex items-end" style={{ gap: '1.5px', padding: '0 1.5px' }}>
-          {bars.map(b => {
-            const inSel = selA !== null && selB !== null && b.hour >= selA && b.hour <= selB;
-            const isHov = hovered === b.hour;
-            const isPeak = b.hour === peakHour && b.count > 0;
-            const heightPct = Math.max(2, (b.count / maxCount) * 88);
-            return (
-              <div
-                key={b.hour}
-                className="flex-1 rounded-t transition-all duration-75"
-                style={{
-                  height: `${heightPct}%`,
-                  background: b.count === 0
-                    ? '#111827'
-                    : inSel
-                      ? 'linear-gradient(to top, #0d9488, #5eead4)'
-                      : isHov || isPeak
-                        ? 'linear-gradient(to top, #3730a3, #a5b4fc)'
-                        : barGradient(b.count, maxCount),
-                  opacity: b.count === 0 ? 0.25 : 1,
-                  boxShadow: inSel ? '0 0 6px #14b8a640' : isPeak ? '0 0 8px #818cf860' : 'none',
-                }}
-              />
-            );
-          })}
-        </div>
-
-        {/* Peak label */}
-        {bars[peakHour]?.count > 0 && (
-          <div className="absolute bottom-6 pointer-events-none flex flex-col items-center"
-            style={{ left: `${((peakHour + 0.5) / 24) * 100}%`, transform: 'translateX(-50%)' }}>
-            <span className="text-[7px] font-bold text-indigo-400/70 leading-none">▲</span>
-          </div>
-        )}
-
-        {/* Hover crosshair */}
-        {hovered !== null && (
-          <div className="absolute top-0 bottom-6 w-px bg-white/10 pointer-events-none"
-            style={{ left: `${((hovered + 0.5) / 24) * 100}%` }} />
-        )}
-
-        {/* Hover tooltip */}
-        {hovered !== null && bars[hovered]?.count > 0 && (
-          <div
-            className="absolute top-2 pointer-events-none z-10"
-            style={{ left: `${Math.min(Math.max(((hovered + 0.5) / 24) * 100, 5), 78)}%`, transform: 'translateX(-50%)' }}
-          >
-            <div className="bg-slate-900/95 border border-white/10 text-white text-[9px] px-2 py-1 rounded whitespace-nowrap shadow-lg">
-              <span className="font-mono font-semibold">{pad2(hovered)}:00</span>
-              <span className="text-white/50 mx-1">·</span>
-              <span className="text-white/80">{bars[hovered].count.toLocaleString()} veh</span>
-            </div>
-          </div>
-        )}
-
-        {/* Hour axis. Every hour 1..24 gets a tick under the bar it belongs to
-            (centred on the bar's mid-point). 1..23 read as the start of each
-            hour; 24 reads as end-of-day on the right edge. tabular-nums keeps
-            the two-digit ticks aligned at this tight pitch. */}
-        <div className="absolute inset-x-0 bottom-0 h-6 border-t border-white/10">
-          {Array.from({ length: 24 }, (_, h) => h + 1).map(h => {
-            const barIndex = h - 1; // ticks point at the bar for hour (h-1)..h
-            return (
-              <div
-                key={h}
-                className="absolute top-1 text-[10px] text-white/70 font-mono tabular-nums leading-none"
-                style={{ left: `${((barIndex + 0.5) / 24) * 100}%`, transform: 'translateX(-50%)' }}
-              >
-                {h}
-              </div>
-            );
-          })}
-        </div>
-      </div>
-      </div>
-
-      {/* X-axis label */}
-      <p className="text-[10px] text-muted-foreground text-center -mt-1">Hour of day (1 = 00:00 to 01:00 ... 24 = 23:00 to 24:00)</p>
-
-      {/* Selection summary / hint - shows only what isn't already obvious from
-          the chart: a vehicle count + window length when a range is picked, or
-          a drag hint when nothing is selected. Time range is shown next to the
-          Run analysis button so the action and its target stay paired. */}
-      {selA !== null && selB !== null ? (
-        <div className="flex items-center gap-2 text-xs">
-          <span className="text-muted-foreground">
-            <span className="font-semibold text-foreground">{selCount.toLocaleString()}</span> vehicles in this window
-          </span>
-          <span className="text-muted-foreground">·</span>
-          <span className="text-muted-foreground">{selB - selA + 1}h span</span>
-        </div>
-      ) : (
-        <p className="text-[10px] text-muted-foreground">
-          Tip: drag across the bars for a custom range, or click a single bar for one hour. Color = traffic density.
-        </p>
-      )}
-    </div>
-  );
-}
 
 export function SignalTimingPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const intersectionId = Number(id);
+
+  // Shell owns the globally-selected replay window (the picker in the tabs
+  // row writes to it). Reading the selection here means the "Replay a specific
+  // window" UI lives in exactly one place rather than being duplicated on
+  // this tab.
+  const shellCtx = useIntersectionShell();
+  const shellWindow = shellCtx.window;
 
   const [data, setData] = useState<SimulationResponse | null>(null);
   const [timingData, setTimingData] = useState<TimingChunk[]>([]);
@@ -558,17 +149,8 @@ export function SignalTimingPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedChunk, setSelectedChunk] = useState<string | null>(null);
-  // Wrapping setter: selecting a TOD period also pre-fills the analyse-window
-  // datetime inputs with that period's wall-clock bounds, so the operator can
-  // click "Analyse" without retyping. "All periods" (null) leaves the inputs
-  // alone so a previously typed range survives.
   function selectChunk(chunkName: string | null) {
     setSelectedChunk(chunkName);
-    if (chunkName == null) return;
-    const bounds = TOD_CHUNK_BOUNDS[chunkName];
-    if (!bounds) return;
-    setHistStart(todayAtMinute(bounds.startMin));
-    setHistEnd(todayAtMinute(bounds.endMin));
   }
   const [view3D, setView3D] = useState(false);
   const [show3DBefore, setShow3DBefore] = useState(false);
@@ -579,22 +161,23 @@ export function SignalTimingPage() {
   // fast to watch during demos. 8× is kept as the "skip ahead" option.
   const [speed3D, setSpeed3D] = useState<1 | 4 | 8 | 16 | 32 | 64>(1);
   const [presentMode, setPresentMode] = useState(false);
-  const [editOpen, setEditOpen] = useState(false);
-  const [editSaving, setEditSaving] = useState(false);
-  const [editStatus, setEditStatus] = useState<string>('fixed_time');
-  const [editCycle, setEditCycle] = useState('');
-  const [editSplits, setEditSplits] = useState<Record<number, string>>({});
+  // Signal/cycle/splits editing moved to the Settings sheet (shell cog) so
+  // there's one path to edit an intersection. The Edit timing dialog that
+  // used to live here is gone; the warning banner below routes operators to
+  // Settings instead.
 
-  // Historical window analysis
-  const [histStart, setHistStart] = useState('');
-  const [histEnd, setHistEnd]     = useState('');
+  // Historical window analysis: input (start/end/vph) comes from the shell
+  // window picker; only the *result* of the windowed compute lives here.
+  // Raw veh/hr over the selected window (no PCE) - feeds the 3D playback
+  // rate so a freshly-picked window animates at the right pace even before
+  // the analytical sim returns.
+  const histVph   = shellWindow?.vph ?? null;
   const [histData, setHistData]   = useState<SimulationResponse | null>(null);
-  const [histLoading, setHistLoading] = useState(false);
-  const [histError, setHistError] = useState<string | null>(null);
-  const [histMode, setHistMode]   = useState(false);
-  // Bar-chart-derived rate fed to the 3D scene while in histMode.
-  // Raw count over the selected window divided by hour span (no PCE).
-  const [histVph, setHistVph]     = useState<number | null>(null);
+  // Loading/error moved to shell context (windowStatus) so the picker chip
+  // renders the state; we no longer keep local copies here.
+  // Historical mode = a window is selected AND we have its computed result.
+  // Derived rather than stored so the picker chip and the page stay in sync.
+  const histMode = shellWindow != null && histData != null;
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setPresentMode(false); };
@@ -645,18 +228,15 @@ export function SignalTimingPage() {
 
   useEffect(() => { loadAll(); }, [loadAll]);
 
-  // Deep-link from a Fix button (e.g. /intersections/:id/timing?edit=1) opens
-  // the edit-timing modal as soon as the intersection has loaded, then strips
-  // the param so a manual refresh doesn't keep re-opening it.
+  // Strip any legacy ?edit=1 deep-link param. The Edit timing dialog moved
+  // to Settings; without this an old bookmark would leave the URL marker
+  // sitting around forever.
   useEffect(() => {
-    if (!intersection) return;
-    if (searchParams.get('edit') !== '1') return;
-    openEdit();
+    if (searchParams.get('edit') == null) return;
     const next = new URLSearchParams(searchParams);
     next.delete('edit');
     setSearchParams(next, { replace: true });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [intersection, searchParams]);
+  }, [searchParams, setSearchParams]);
 
   const [generating, setGenerating] = useState(false);
   async function runAnalyse() {
@@ -715,201 +295,54 @@ export function SignalTimingPage() {
   const displayTiming   = histMode ? histTiming : (selectedTiming ?? peakTiming);
   const activeTiming    = displayTiming;
 
-  function openEdit() {
-    if (!intersection) return;
-    setEditStatus(intersection.signal_status ?? 'fixed_time');
-    const cycle = intersection.existing_cycle_length ?? 90;
-    setEditCycle(String(cycle));
-    const splits: Record<number, string> = {};
-    const defaultGreen = Math.round(cycle / Math.max(streets.length, 1));
-    for (const s of streets) {
-      splits[s.id] = String(
-        (intersection.existing_green_splits as Record<string, number> | null)?.[String(s.id)]
-        ?? defaultGreen,
-      );
-    }
-    setEditSplits(splits);
-    setEditOpen(true);
-  }
+  // openEdit / fillFromRecommendation / saveEdit removed - the signal +
+  // cycle + splits editor lives in the Settings sheet now (cog icon in the
+  // shell). The "Use recommendation" shortcut moved with it; the in-sheet
+  // version pulls from the latest sim's peak chunk rather than the per-chunk
+  // context that used to be available on this page.
 
-  // Copy Webster's proposed timing for the active chunk into the form so the
-  // operator's last step is "review + Save" rather than re-typing values they
-  // can already see on the chart.
-  function fillFromRecommendation() {
-    if (!activeChunk) return;
-    const cycle = activeChunk.proposed_cycle_s;
-    const proposedSplits = activeChunk.proposed_splits;
-    if (cycle == null || !proposedSplits) {
-      toast.error('No recommendation available for this period');
+
+  // Auto-fires the windowed sim whenever the shell picker commits a new
+  // selection. The picker is the action; this page just listens and reports
+  // status back to the shell so the picker chip can show its own spinner /
+  // error pill (replacing the standalone "Replaying" strip this page used
+  // to render under itself).
+  const setWindowStatus = shellCtx.setWindowStatus;
+  const analyseWindow = useCallback(async (start: string, end: string) => {
+    if (end <= start) {
+      setWindowStatus({ state: 'error', message: 'End must be after start' });
       return;
     }
-    setEditStatus(intersection?.signal_status === 'unsignalized' ? 'fixed_time' : (intersection?.signal_status ?? 'fixed_time'));
-    setEditCycle(String(Math.round(cycle)));
-    const next: Record<number, string> = {};
-    for (const s of streets) {
-      const v = proposedSplits[String(s.id)];
-      next[s.id] = v != null ? String(Math.round(v)) : (editSplits[s.id] ?? '0');
-    }
-    setEditSplits(next);
-    toast.success(`Loaded recommendation for ${activeChunk.chunk_name}`);
-  }
-
-  async function saveEdit() {
-    if (!intersectionId) return;
-    setEditSaving(true);
+    setWindowStatus({ state: 'loading' });
     try {
-      const isSignalized = editStatus !== 'unsignalized';
-      const cycle = isSignalized ? (parseInt(editCycle) || null) : null;
-      const splits: Record<string, number> | null = isSignalized && cycle != null
-        ? Object.fromEntries(streets.map(s => [String(s.id), parseInt(editSplits[s.id] ?? '0') || 0]))
-        : null;
-      const payload: SignalTimingPayload = {
-        signal_status: editStatus as SignalTimingPayload['signal_status'],
-        existing_cycle_length: cycle,
-        existing_green_splits: splits,
-      };
-      const updated = await intersectionsApi.patchTiming(intersectionId, payload);
-      setIntersection(updated);
-      setEditOpen(false);
-      toast.success('Signal timing updated');
-    } catch (err: unknown) {
-      toast.error(err instanceof Error ? err.message : 'Failed to save');
-    } finally {
-      setEditSaving(false);
-    }
-  }
-
-  async function analyseWindow() {
-    if (!histStart || !histEnd) return;
-    // histStart / histEnd are naive local-time strings from the bar-chart selector
-    // (e.g. '2026-06-16T06:00'). Convert through new Date().toISOString() would
-    // shift them by the browser's UTC offset, sending the wrong window to the server.
-    // The backend (Asia/Manila) treats naive datetimes as server-local time - the
-    // same convention the traffic bar chart already uses for its own history queries.
-    const start = histStart + ':00';
-    const end   = histEnd   + ':00';
-    // String comparison is safe here: both values share the same YYYY-MM-DDTHH:MM:SS format.
-    if (end <= start) { toast.error('End must be after start'); return; }
-    setHistLoading(true);
-    setHistError(null);
-    try {
-      const result = await simulationApi.compute({ intersection_id: intersectionId, start, end });
+      const result = await simulationApi.compute({
+        intersection_id: intersectionId,
+        start: start.length === 16 ? start + ':00' : start,
+        end:   end.length   === 16 ? end + ':00'   : end,
+      });
       setHistData(result);
-      setHistMode(true);
       setSelectedChunk(null);
-      toast.success('Historical analysis complete');
+      setWindowStatus({ state: 'idle' });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'No data for this window';
-      setHistError(msg);
-      toast.error(msg);
-    } finally {
-      setHistLoading(false);
+      setWindowStatus({ state: 'error', message: msg });
     }
-  }
+  }, [intersectionId, setWindowStatus]);
 
-  function exitHistMode() {
-    setHistMode(false);
-    setHistData(null);
-    setHistError(null);
-    setHistVph(null);
-    setSelectedChunk(null);
-  }
-
-  // Replay panel JSX as a closure so it can be slotted both right under the
-  // Findings card (the default position when a recommendation exists) and
-  // under the empty-state banner (so historical drill-down still works for
-  // intersections with no rec). Styled to match the Findings card baseline so
-  // it reads as a sibling card, not a separate widget.
-  function renderReplayPanel() {
-    return (
-      <div className={cn(
-        'rounded-xl border bg-card p-4 print:hidden transition-colors',
-        histMode ? 'border-teal-400/60 ring-1 ring-teal-400/20' : 'border-border',
-      )}>
-        <div className="flex items-start gap-2.5 mb-3">
-          <div className="rounded-lg bg-teal-100 dark:bg-teal-900/40 p-1.5 mt-0.5 shrink-0">
-            <History className="size-3.5 text-teal-700 dark:text-teal-300" />
-          </div>
-          <div className="flex-1 min-w-0">
-            <h2 className="text-sm font-semibold leading-tight">Replay a specific window</h2>
-            <p className="text-[11px] text-muted-foreground mt-0.5">
-              One-click a TOD chunk, or drag the bars for a custom range. Webster re-runs on real detections from that window.
-            </p>
-          </div>
-          {histMode && (
-            <span className="text-[10px] text-teal-700 dark:text-teal-300 font-medium flex items-center gap-1 bg-teal-100/80 dark:bg-teal-900/40 px-2 py-0.5 rounded-full whitespace-nowrap">
-              <FlaskConical className="size-3" /> Real-data window
-            </span>
-          )}
-        </div>
-
-        <TrafficTimeline
-          intersectionId={intersectionId}
-          onRange={(start, end, vph) => { setHistStart(start); setHistEnd(end); setHistVph(vph); }}
-        />
-
-        <div className="flex items-center gap-2 mt-3 pt-3 border-t border-border flex-wrap">
-          {histStart && histEnd ? (
-            <div className="flex items-center gap-2 text-xs">
-              <span className="text-muted-foreground">Selected:</span>
-              <span className="font-mono tabular-nums font-semibold text-teal-700 dark:text-teal-300">
-                {histStart.slice(11, 16)} – {histEnd.slice(11, 16)}
-              </span>
-              <span className="text-muted-foreground/70 font-mono text-[10px]">{histStart.slice(0, 10)}</span>
-            </div>
-          ) : (
-            <p className="text-xs text-muted-foreground italic">
-              Pick a preset above or drag the timeline to choose a window
-            </p>
-          )}
-          <div className="flex items-center gap-2 ml-auto">
-            {histMode && (
-              <Button size="sm" variant="outline" onClick={exitHistMode}>
-                Back to current
-              </Button>
-            )}
-            <Button
-              data-testid="btn-analyse"
-              size="sm"
-              onClick={analyseWindow}
-              disabled={histLoading || !histStart || !histEnd}
-              className={cn(
-                histStart && histEnd && !histLoading && !histMode &&
-                'bg-teal-600 hover:bg-teal-700 text-white shadow-md ring-2 ring-teal-400/30',
-              )}
-            >
-              {histLoading ? <Loader2 className="size-3.5 animate-spin mr-1.5" /> : <FlaskConical className="size-3.5 mr-1.5" />}
-              {histLoading ? 'Analysing…' : 'Run analysis'}
-            </Button>
-          </div>
-        </div>
-        {histError && <p className="text-xs text-rose-600 mt-2">{histError}</p>}
-      </div>
-    );
-  }
+  useEffect(() => {
+    if (!shellWindow) {
+      setHistData(null);
+      setSelectedChunk(null);
+      setWindowStatus({ state: 'idle' });
+      return;
+    }
+    analyseWindow(shellWindow.start, shellWindow.end);
+  }, [shellWindow, analyseWindow, setWindowStatus]);
 
   return (
     <div className="flex flex-col gap-5 print:gap-2">
-      {/* Tab-local action row - Analyse and Settings live on the parent shell.
-          Only Edit timing + Print stay here since they're tab-specific. */}
-      <div className="flex items-center gap-2 flex-wrap print:hidden">
-        <p className="text-xs text-muted-foreground flex-1">
-          {displayData?.signal_status.replace('_', ' ')}
-          {histMode && <span className="ml-1.5 text-teal-600 dark:text-teal-400">· historical window</span>}
-        </p>
-        {intersection && !histMode && (
-          <Button data-testid="btn-edit-timing" variant="outline" size="sm" onClick={openEdit}>
-            <Pencil className="size-3.5 mr-1.5" />
-            Edit timing
-          </Button>
-        )}
-        {data && (
-          <Button data-testid="btn-print" variant="outline" size="sm" onClick={() => window.print()}>
-            <Printer className="size-3.5 mr-1.5" />
-            Print / Export PDF
-          </Button>
-        )}
-      </div>
+      {/* Tab-local action row gone - the only thing it carried was Edit
+          timing, and that lives in the Settings sheet now (shell cog). */}
 
       {/* Print header - only visible when printing */}
       <div className="hidden print:block mb-4">
@@ -929,54 +362,47 @@ export function SignalTimingPage() {
       )}
 
       {/* Empty-state when no recommendation has been generated yet (typical
-          for unsignalized + not-warranted intersections). Keeps the
-          Analyse-window panel visible below so operators can still drill
-          into historical date ranges. */}
+          for unsignalized + not-warranted intersections). Pick a window from
+          the picker in the tabs row to drill into historical data. */}
       {!loading && !displayData && !error && (
         <div className="rounded-lg border border-border bg-muted/30 p-4 text-sm">
           <p className="font-medium">No timing recommendation generated.</p>
           <p className="text-xs text-muted-foreground mt-1">
             {intersection?.signal_status === 'unsignalized'
-              ? 'This intersection is unsignalized and current volumes don’t trigger any warrant. You can still analyse historical windows below.'
-              : 'Run analysis from the parent header to generate a timing comparison. You can also analyse a historical window below.'}
+              ? 'This intersection is unsignalized and current volumes don’t trigger any warrant. Pick a time window from the picker in the tabs row to analyse a specific historical period.'
+              : 'Run analysis from the parent header to generate a timing comparison, or pick a window from the picker in the tabs row to drill into a specific period.'}
           </p>
         </div>
       )}
 
-      {/* Replay panel is rendered further down (right under Findings) so the
-          headline the engineer came to see sits at the top of the tab. When
-          there's no recommendation at all, we still render it here so
-          historical drill-down stays reachable. */}
-      {!loading && !error && !displayData && renderReplayPanel()}
+      {/* Replay status is now communicated by the picker chip itself
+          (loading spinner / error pill / inline clear-X). No separate strip
+          in the tab body. */}
 
       {displayData && !loading && (
         <>
-          {/* Before-state source banner */}
-          {displayData.baseline_note && (
-            <div className={cn(
-              'rounded-lg border px-4 py-2.5 text-xs',
-              histMode
-                ? 'border-teal-300 bg-teal-50 dark:bg-teal-950/20 dark:border-teal-800 text-teal-800 dark:text-teal-300'
-                : 'border-amber-200 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-900 text-amber-800 dark:text-amber-300',
-            )}>
+          {/* Before-state source banner. In replay mode the Replaying strip
+              above already names the window in plain language; the
+              baseline_note ("Real-data window · ... · 1178 PCU/hr ...") then
+              duplicates that information in a second green box right under
+              the first. Suppress it in replay mode and keep it for the
+              default sim (where it conveys data freshness). */}
+          {!histMode && displayData.baseline_note && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-900 text-amber-800 dark:text-amber-300 px-4 py-2.5 text-xs">
               {displayData.baseline_note}
             </div>
           )}
 
-          {/* Warning: signalized but no existing timing entered - before-state is fictional */}
+          {/* Warning: signalized but no existing timing entered - before-state is fictional.
+              Routes the operator to the Settings cog in the shell, which now
+              owns the timing editor. */}
           {!histMode && (displayData.signal_status === 'fixed_time' || displayData.signal_status === 'actuated') && !displayData.existing_cycle_s && (
             <div className="rounded-lg border border-rose-200 bg-rose-50 dark:bg-rose-950/20 dark:border-rose-900 px-4 py-3 text-xs text-rose-800 dark:text-rose-300">
               <span className="font-semibold">Before-state is an assumption, not measured data.</span>{' '}
               This intersection is marked as {data.signal_status.replace('_', '-')} but no existing cycle length
               or green time per approach has been entered. The "before" delay is computed using an equal-split default
-              and will understate or overstate the real improvement.{' '}
-              <button
-                type="button"
-                onClick={openEdit}
-                className="font-medium underline underline-offset-2 hover:opacity-80 transition-opacity"
-              >
-                Click "Edit timing" above to enter the current cycle length and per-approach splits.
-              </button>
+              and will understate or overstate the real improvement. Open Settings (cog icon in the header) to enter
+              the current cycle length and per-approach splits.
             </div>
           )}
 
@@ -1112,46 +538,64 @@ export function SignalTimingPage() {
                     are correct; the headline reflects the daily picture.
                   </p>
                 )}
+
+                {/* Stochastic confidence (Monte Carlo) - lives inside the
+                    Findings card so action, deterministic projection, and
+                    100-replay verdict read as one block of evidence. Default
+                    mode aggregates across every TOD chunk into an "All day"
+                    envelope; replay mode runs MC against the picked window
+                    so the envelope matches windowed Webster's units. */}
+                {displayData.daily_summary.total_vehicle_hours_saved > 0 && (
+                  <div className="border-t border-border pt-3">
+                    <ConfidenceBadge
+                      intersectionId={intersectionId}
+                      variant="section"
+                      window={shellWindow ? { start: shellWindow.start, end: shellWindow.end } : null}
+                    />
+                  </div>
+                )}
               </div>
             );
           })()}
 
-          {/* Replay panel as a sibling card to Findings - so the engineer
-              sees the headline first, then has the drill-down tool right
-              next to it without having to scroll past anything else. */}
-          {renderReplayPanel()}
-
-          {/* Global chunk filter */}
-          <div className="flex flex-wrap items-center gap-1.5 print:hidden">
-            <button
-              data-testid="btn-chunk-all"
-              onClick={() => selectChunk(null)}
-              className={cn(
-                'px-3 py-1 text-xs rounded-md border transition-colors',
-                selectedChunk === null
-                  ? 'bg-primary text-primary-foreground border-primary'
-                  : 'border-border text-muted-foreground hover:border-foreground hover:text-foreground',
-              )}
-            >
-              All periods
-            </button>
-            {displayData.chunks.map(c => (
+          {/* Global TOD chunk filter - only shown for the default (latest) sim,
+              which has multiple chunks. In replay mode the windowed sim returns
+              a single synthetic chunk (e.g. "Jun 30 20:00 – 21:00") so the
+              filter row would collapse to one always-active pill and only
+              confuse the operator. The Replaying strip above already names
+              the active window. */}
+          {!histMode && (
+            <div className="flex flex-wrap items-center gap-1.5 print:hidden">
               <button
-                key={c.chunk_name}
-                data-testid={`btn-chunk-${c.chunk_name.toLowerCase().replace(/\s+/g, '-')}`}
-                onClick={() => selectChunk(c.chunk_name)}
+                data-testid="btn-chunk-all"
+                onClick={() => selectChunk(null)}
                 className={cn(
                   'px-3 py-1 text-xs rounded-md border transition-colors',
-                  selectedChunk === c.chunk_name
+                  selectedChunk === null
                     ? 'bg-primary text-primary-foreground border-primary'
                     : 'border-border text-muted-foreground hover:border-foreground hover:text-foreground',
                 )}
               >
-                {c.chunk_name}
+                All periods
               </button>
-            ))}
-            <TodChunkInfoDialog />
-          </div>
+              {displayData.chunks.map(c => (
+                <button
+                  key={c.chunk_name}
+                  data-testid={`btn-chunk-${c.chunk_name.toLowerCase().replace(/\s+/g, '-')}`}
+                  onClick={() => selectChunk(c.chunk_name)}
+                  className={cn(
+                    'px-3 py-1 text-xs rounded-md border transition-colors',
+                    selectedChunk === c.chunk_name
+                      ? 'bg-primary text-primary-foreground border-primary'
+                      : 'border-border text-muted-foreground hover:border-foreground hover:text-foreground',
+                  )}
+                >
+                  {c.chunk_name}
+                </button>
+              ))}
+              <TodChunkInfoDialog />
+            </div>
+          )}
 
           {/* Summary strip - shows selected chunk when one is active, daily totals for "All" */}
           {(() => {
@@ -1704,102 +1148,6 @@ export function SignalTimingPage() {
         </div>
       )}
 
-      {/* Edit signal timing dialog */}
-      <Dialog open={editOpen} onOpenChange={setEditOpen}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>Edit signal timing</DialogTitle>
-          </DialogHeader>
-          <div className="flex flex-col gap-4 py-2">
-            <div className="flex flex-col gap-1.5">
-              <Label>Signal type</Label>
-              <div className="flex gap-2">
-                {(['fixed_time', 'actuated', 'unsignalized'] as const).map(s => (
-                  <button
-                    key={s}
-                    type="button"
-                    onClick={() => setEditStatus(s)}
-                    className={cn(
-                      'flex-1 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors',
-                      editStatus === s
-                        ? 'bg-foreground text-background border-foreground'
-                        : 'border-border text-muted-foreground hover:text-foreground',
-                    )}
-                  >
-                    {s === 'fixed_time' ? 'Fixed-time' : s === 'actuated' ? 'Actuated' : 'Unsignalized'}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {editStatus !== 'unsignalized' && (
-              <>
-                {activeChunk?.proposed_cycle_s != null && activeChunk?.proposed_splits && (
-                  <button
-                    type="button"
-                    data-testid="btn-use-recommendation"
-                    onClick={fillFromRecommendation}
-                    className="flex items-start gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-left text-xs hover:bg-emerald-100 transition-colors dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:hover:bg-emerald-950/50"
-                    title="Copy Webster's proposal for this period into the form"
-                  >
-                    <RefreshCw className="size-3.5 mt-0.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
-                    <div className="flex-1 min-w-0">
-                      <p className="font-medium text-emerald-900 dark:text-emerald-200">
-                        Use recommendation · {activeChunk.chunk_name}
-                      </p>
-                      <p className="mt-0.5 text-[11px] text-emerald-700/80 dark:text-emerald-400/80">
-                        {Math.round(activeChunk.proposed_cycle_s)}s cycle, Webster splits
-                      </p>
-                    </div>
-                  </button>
-                )}
-
-                <div className="flex flex-col gap-1.5">
-                  <Label htmlFor="edit-cycle">Cycle length (seconds)</Label>
-                  <Input
-                    id="edit-cycle"
-                    type="number"
-                    min={20}
-                    max={180}
-                    value={editCycle}
-                    onChange={e => setEditCycle(e.target.value)}
-                    placeholder="e.g. 90"
-                  />
-                </div>
-
-                {streets.length > 0 && (
-                  <div className="flex flex-col gap-2">
-                    <Label>Green time per approach (seconds)</Label>
-                    {streets.map(s => (
-                      <div key={s.id} className="flex items-center gap-3">
-                        <span className="text-xs text-muted-foreground w-28 shrink-0 truncate capitalize">
-                          {s.arm_direction !== 'unknown' ? s.arm_direction : s.name}
-                        </span>
-                        <Input
-                          type="number"
-                          min={5}
-                          max={120}
-                          value={editSplits[s.id] ?? ''}
-                          onChange={e => setEditSplits(prev => ({ ...prev, [s.id]: e.target.value }))}
-                          placeholder="e.g. 22"
-                          className="h-8 text-sm"
-                        />
-                        <span className="text-xs text-muted-foreground shrink-0">s</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-          <DialogFooter>
-            <Button variant="outline" size="sm" onClick={() => setEditOpen(false)}>Cancel</Button>
-            <Button size="sm" onClick={saveEdit} disabled={editSaving}>
-              {editSaving ? 'Saving…' : 'Save'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

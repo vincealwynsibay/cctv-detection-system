@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useState } from 'react';
-import { Link, Outlet, useNavigate, useOutletContext, useParams } from 'react-router-dom';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Outlet, useNavigate, useOutletContext, useParams } from 'react-router-dom';
 import { ArrowLeft, Loader2, Printer, RefreshCw, Settings2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { IntersectionTabs } from '@/components/IntersectionTabs';
+import { IntersectionVerdictBanner } from '@/components/IntersectionVerdictBanner';
+import { IntersectionWindowPicker } from '@/components/IntersectionWindowPicker';
 import { SettingsSheet } from '@/components/IntersectionSettingsSheet';
 import { intersectionsApi } from '@/services/intersections';
 import { cctvsApi } from '@/services/cctvs';
@@ -12,10 +14,6 @@ import { recommendationsApi, type RecommendationResponse } from '@/services/reco
 import { simulationApi, type SimulationResponse } from '@/services/simulation';
 import type { AggregationRow, CCTV, Intersection, Street } from '@/types';
 import type { SSEStatus } from '@/hooks/useSSE';
-import {
-  statusBucket, BUCKET_LABEL, BUCKET_BADGE_CLASS,
-} from '@/components/recommendations/statusBucket';
-import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
 
 /**
@@ -33,6 +31,36 @@ import { toast } from 'sonner';
  * outlet context so tabs don't all hammer the API independently. Tabs
  * can still fetch their own extras (simulation, timing chunks, etc.).
  */
+/**
+ * Globally-selected replay window. Lives on the shell so every tab reads from
+ * the same source; brushing the picker in one tab updates the others without
+ * page-local state ever forking. `null` means "default (no window)" and tabs
+ * fall back to their normal data source (latest sim, full day, etc.).
+ */
+export interface WindowSelection {
+  /** YYYY-MM-DD calendar day the window belongs to. */
+  date:        string;
+  /** YYYY-MM-DDTHH:MM (naive local time) - inclusive start. */
+  start:       string;
+  /** YYYY-MM-DDTHH:MM - exclusive end. */
+  end:         string;
+  /** Average vph over the selected hours (handy for replay-driven visuals). */
+  vph:         number;
+  /** Preset label if one of the named buttons fired it ('AM Rush', etc). */
+  presetLabel: string | null;
+}
+
+/**
+ * Status of the windowed sim the consuming tab is running for the selected
+ * window. Lives on the shell so the picker chip can show a spinner or an
+ * error pill directly - removes the need for a separate "Replaying" strip
+ * in the tab body that restated the same state in a second place.
+ */
+export interface WindowStatus {
+  state:    'idle' | 'loading' | 'error';
+  message?: string;
+}
+
 export interface IntersectionShellContext {
   intersection: Intersection | null;
   rec: RecommendationResponse | null;
@@ -43,6 +71,12 @@ export interface IntersectionShellContext {
   refreshShell: () => Promise<void>;
   sseData: AggregationRow[] | null;
   sseStatus: SSEStatus;
+  /** Globally-selected replay window. null = default (no window). */
+  window: WindowSelection | null;
+  setWindow: (sel: WindowSelection | null) => void;
+  /** Tab-reported status of any windowed compute it's running. */
+  windowStatus: WindowStatus;
+  setWindowStatus: (s: WindowStatus) => void;
 }
 
 interface ParentContext {
@@ -65,6 +99,14 @@ export function IntersectionShell() {
   const [error, setError]               = useState<string | null>(null);
   const [generating, setGenerating]     = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Globally-selected replay window. null = default. Reset on intersection
+  // change so an "AM Rush" pick on intersection A doesn't bleed into B.
+  const [window_, setWindow]            = useState<WindowSelection | null>(null);
+  const [windowStatus, setWindowStatus] = useState<WindowStatus>({ state: 'idle' });
+  useEffect(() => {
+    setWindow(null);
+    setWindowStatus({ state: 'idle' });
+  }, [interId]);
 
   const load = useCallback(async () => {
     if (!Number.isFinite(interId)) {
@@ -142,6 +184,19 @@ export function IntersectionShell() {
     }
   }
 
+  // Rolling daily count from the SSE feed, scoped to this intersection. Used
+  // by the verdict banner's "Detections" reasoning row so every tab sees the
+  // same live number without re-summing it locally. Computed before the early
+  // returns so the hook order stays stable across renders.
+  const liveCount = useMemo(() => {
+    if (!sseData) return null;
+    let total = 0;
+    for (const row of sseData) {
+      if (row.intersection_id === interId) total += row.count;
+    }
+    return total;
+  }, [sseData, interId]);
+
   if (loading) {
     return (
       <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted-foreground">
@@ -159,18 +214,10 @@ export function IntersectionShell() {
     );
   }
 
-  // Warrant-bucket badge ("Warranted" / "Not warranted") answers the question
-  // "should this *unsignalized* intersection get a signal?" - it's meaningless
-  // on intersections that already have one, where the badge just reads as a
-  // damning verdict on a question that isn't even being asked. Suppress it for
-  // signalized intersections; the separate signal-status badge already conveys
-  // that the intersection has a signal.
-  const isSignalized =
-    intersection != null &&
-    (intersection.signal_status === 'fixed_time' || intersection.signal_status === 'actuated');
-  const bucket = rec && !isSignalized ? statusBucket(rec) : null;
   const ctx: IntersectionShellContext = {
     intersection, rec, streets, cameras, sim, refreshShell: load, sseData, sseStatus,
+    window: window_, setWindow,
+    windowStatus, setWindowStatus,
   };
 
   return (
@@ -183,11 +230,6 @@ export function IntersectionShell() {
         <div className="flex-1 flex flex-col gap-0.5 min-w-0">
           <div className="flex items-center gap-2 min-w-0 flex-wrap">
             <h1 className="text-xl font-semibold tracking-tight truncate">{intersection.name}</h1>
-            {bucket && (
-              <Badge className={cn('shrink-0 text-[10px]', BUCKET_BADGE_CLASS[bucket])}>
-                {BUCKET_LABEL[bucket]}
-              </Badge>
-            )}
             <Badge variant="secondary" className="shrink-0 text-[10px]">
               {intersection.signal_status.replace('_', ' ')}
             </Badge>
@@ -216,18 +258,49 @@ export function IntersectionShell() {
           >
             <Settings2 className="size-4" />
           </button>
-          <Button asChild variant="outline" size="sm" className="h-7 text-xs">
-            <Link to={`/intersections/${interId}/report`}>
-              <Printer className="size-3 mr-1" />
-              Print report
-            </Link>
+          {/* Print/Export PDF lives in the shell because every tab's print
+              action was just window.print() against tab-local print: CSS -
+              identical wiring on Live, Timing, and Report. Centralising it
+              kills the duplicate buttons and gives every tab the affordance. */}
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-7 text-xs"
+            onClick={() => window.print()}
+            title="Print the current view as PDF"
+          >
+            <Printer className="size-3 mr-1" />
+            Print
           </Button>
         </div>
       </div>
 
-      {/* Tabs row */}
-      <div className="print:hidden">
+      {/* Single verdict banner - the reconciled action sits above every tab so
+          no individual tab needs to re-render it. The "Why" popover expands the
+          full detections -> CNN -> warrant -> Webster -> sim reasoning chain. */}
+      <IntersectionVerdictBanner
+        intersection={intersection}
+        rec={rec}
+        sim={sim}
+        liveCount={liveCount}
+        baseHref={`/intersections/${interId}`}
+        busy={generating}
+      />
+
+      {/* Tabs row + shell-level window picker. Both right-aligned so they
+          read as one group of view-scoping controls (which tab, which time
+          window). The picker writes to shell context so every tab can read
+          the selected replay window from one place rather than each holding
+          its own histStart/histEnd state. */}
+      <div className="flex items-center justify-end gap-2 print:hidden flex-wrap">
         <IntersectionTabs intersectionId={interId} />
+        <IntersectionWindowPicker
+          intersectionId={interId}
+          selection={window_}
+          onChange={setWindow}
+          status={windowStatus}
+        />
       </div>
 
       {/* Active tab renders here */}

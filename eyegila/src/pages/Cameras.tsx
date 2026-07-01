@@ -68,11 +68,13 @@ function CameraCard({ cam, intersectionName, snapshotTick }: { cam: CCTV; inters
             </span>
           </Link>
         ) : (
-          <div className="aspect-video rounded-md bg-muted/30 border border-dashed border-border flex flex-col items-center justify-center gap-1.5 text-muted-foreground">
+          // Empty-state placeholder. Used to repeat the status word
+          // ("Offline" / "Reconnecting…") which the chip above already
+          // shows - just the icon now, keeping the card less noisy.
+          <div className="aspect-video rounded-md bg-muted/30 border border-dashed border-border flex items-center justify-center text-muted-foreground">
             {cam.status === 'reconnecting'
               ? <RefreshCw className="size-5 text-amber-500 animate-spin" />
               : <WifiOff className="size-5 text-red-400" />}
-            <span className="text-[10px]">{cam.status === 'reconnecting' ? 'Reconnecting…' : 'Offline'}</span>
           </div>
         )}
 

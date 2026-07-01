@@ -89,46 +89,80 @@ const LABEL_TEXT: Record<StochasticConfidenceResponse['label'], string> = {
 
 interface Props {
   intersectionId: number;
-  /** Card-style render (default, matches the 4 stats cards on IntersectionReport). */
-  variant?: 'card' | 'inline';
+  /**
+   * Render style:
+   *   * 'card'    - self-wrapped card (border + bg). Default.
+   *   * 'section' - same content as 'card' but no outer wrapper, for slotting
+   *                 inside an existing card (e.g. the Findings panel) so the
+   *                 verdict and the confidence read as one block.
+   *   * 'inline'  - tiny pill for placing beside a vh_saved number.
+   */
+  variant?: 'card' | 'section' | 'inline';
+  /**
+   * Optional time window. When set, runs MC against that window via
+   * `/simulation/stochastic-confidence/compute` so the envelope reads in
+   * the same window-total units as the windowed Webster's Findings card.
+   * When null, defaults to `?chunk=all` (all-day aggregate), which keeps
+   * the badge's denominator the same as the daily Findings card.
+   */
+  window?: { start: string; end: string } | null;
 }
 
 /**
- * Surfaces the Monte Carlo confidence level for the latest recommendation's
- * peak chunk. Fetches lazily; the backend takes ~10s on a cache miss and
- * <50 ms on a hit, so we render a tiny spinner during cold loads and the
- * cached banner subsequently.
+ * Surfaces the Monte Carlo confidence level for the active recommendation.
  *
- * Why a badge + sentence instead of raw numbers:
- *   * Operators need a decision, not a distribution.
- *   * The plain-English sentence carries the CI bounds for readers who want
- *     them, without making them mandatory parsing for everyone.
- *   * The `<JargonTip term="monte_carlo" />` next to the badge explains what
- *     "Monte Carlo" means for someone who's never seen one.
+ * Two modes:
+ *   * Default (no `window` prop): aggregates MC across every TOD chunk into
+ *     an "All day" envelope, matching the daily Findings card's denominator.
+ *   * Windowed (`window` set): runs MC against the user-picked window so the
+ *     envelope reads in window-total units, matching the windowed Findings.
+ *
+ * Why two paths instead of one:
+ *   The aggregated "All day" view is cached (~50 ms on a hit, ~10 s on a
+ *   cold miss across chunks) and is the right denominator for the default
+ *   page. The windowed view is uncached (each window is unique) but only
+ *   fires when the operator actively picks a replay window, so the 10 s
+ *   wait is paired with the same wait they already incur for the windowed
+ *   Webster's sim.
  */
-export function ConfidenceBadge({ intersectionId, variant = 'card' }: Props) {
+export function ConfidenceBadge({ intersectionId, variant = 'card', window }: Props) {
   const [data, setData] = useState<StochasticConfidenceResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Memoise the window key for the effect deps so a re-render with the same
+  // window object (different identity) doesn't refetch.
+  const windowKey = window ? `${window.start}|${window.end}` : '';
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    simulationApi
-      .stochasticConfidence(intersectionId)
+    const fetcher = window
+      ? simulationApi.stochasticConfidenceWindow({
+          intersection_id: intersectionId,
+          start: window.start.length === 16 ? window.start + ':00' : window.start,
+          end:   window.end.length   === 16 ? window.end + ':00'   : window.end,
+        })
+      : simulationApi.stochasticConfidence(intersectionId, 'all');
+    fetcher
       .then(r => { if (!cancelled) setData(r); })
       .catch(e => { if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load'); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [intersectionId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [intersectionId, windowKey]);
 
-  if (variant === 'card') {
-    return (
-      <div className="rounded-lg border border-border bg-card p-4 print:p-3">
+  if (variant === 'card' || variant === 'section') {
+    // Shared body: section omits the outer wrapper so it can sit inside an
+    // existing card; card adds the border + bg so it can live on its own.
+    const body = (
+      <>
         <div className="flex items-center gap-1">
-          <p className="text-xs text-muted-foreground">Confidence</p>
-          <JargonTip term="monte_carlo" />
+          <p className="text-[10px] uppercase tracking-wide text-muted-foreground inline-flex items-center gap-1">
+            Confidence
+            <JargonTip term="monte_carlo" />
+          </p>
         </div>
         {loading ? (
           <div className="flex items-center gap-1.5 mt-1.5 text-muted-foreground text-xs">
@@ -181,6 +215,12 @@ export function ConfidenceBadge({ intersectionId, variant = 'card' }: Props) {
             </details>
           </>
         ) : null}
+      </>
+    );
+    if (variant === 'section') return <div className="flex flex-col">{body}</div>;
+    return (
+      <div className="rounded-lg border border-border bg-card p-4 print:p-3">
+        {body}
       </div>
     );
   }

@@ -93,4 +93,14 @@ export const simulationApi = {
       `/simulation/${intersectionId}/stochastic-confidence${qs}`,
     );
   },
+
+  /** Run the 100-replay Monte Carlo against a user-picked time window. Pairs
+   *  with simulationApi.compute so the deterministic windowed sim and the
+   *  stochastic confidence cover the same period in the same units. */
+  stochasticConfidenceWindow: (params: { intersection_id: number; start: string; end: string }) =>
+    request<StochasticConfidenceResponse>('/simulation/stochastic-confidence/compute', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    }),
 };

@@ -200,7 +200,24 @@ def compute_historical_simulation(
     if body.end <= body.start:
         raise HTTPException(status_code=422, detail="end must be after start")
 
-    result = compute_simulation_for_window(db, intersection, body.start, body.end)
+    # Wrap the compute so any unhandled exception inside the windowed sim
+    # surfaces as a 500 *with the actual error message* instead of the
+    # generic "Internal Server Error" string FastAPI returns by default.
+    # The replay strip in the UI shows this detail to the operator, so a
+    # clear message saves a server-log roundtrip when something blows up.
+    try:
+        result = compute_simulation_for_window(db, intersection, body.start, body.end)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(
+            "compute_simulation_for_window failed (intersection=%s window=%s..%s)",
+            body.intersection_id, body.start.isoformat(), body.end.isoformat(),
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Window simulation failed: {type(exc).__name__}: {exc}",
+        ) from exc
 
     if not result["has_data"]:
         raise HTTPException(
@@ -910,4 +927,287 @@ def get_stochastic_confidence(
             raise HTTPException(status_code=404, detail="No simulation chunks to score")
 
     payload = _compute_chunk_mc(db, intersection, rec_id, peak_row.chunk_name, peak_row)
+    return StochasticConfidenceResponse(**payload)
+
+
+def _compute_window_mc(
+    db: Session,
+    intersection: models.Intersection,
+    start: datetime,
+    end: datetime,
+) -> dict:
+    """Monte Carlo for a user-picked time window.
+
+    Mirrors `_compute_chunk_mc` but pulls flows for the window via
+    `pcu_flow_for_window` and reports stats as *window totals* (mean+CI
+    scaled by window_hrs) so the envelope reads in the same units as the
+    windowed Webster's vh_saved shown in the Findings card. Unlike the
+    chunk path this is uncached; each window is unique to the operator's
+    selection and the MC takes ~10 s.
+    """
+    from server.simulation import _phase_offsets, compute_uniform_delay
+    from server.stochastic_simulation import (
+        DEFAULT_N_RUNS,
+        DEFAULT_DURATION_SEC,
+        SignalProgram,
+        _draw_arrivals,
+        _per_run_rng,
+        monte_carlo_compare,
+        simulate_one_run,
+    )
+    from server.webster import (
+        compute_timing,
+        effective_saturation_flow,
+        get_street_directions,
+        group_phases,
+        pcu_flow_for_window,
+    )
+    from server.pce import resolve_pce
+
+    intersection_id = intersection.id
+    pce_map = resolve_pce(db, intersection_id)
+    flows   = pcu_flow_for_window(db, intersection_id, start, end, pce_map)
+    if not flows:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No detection data for "
+                f"{start.strftime('%Y-%m-%d %H:%M')} - {end.strftime('%H:%M')}"
+            ),
+        )
+
+    directions = get_street_directions(db, intersection_id)
+    n_arms     = len(flows)
+    lost_time  = intersection.lost_time_per_phase or 4
+    all_red    = intersection.all_red_clearance   or 3
+    min_c      = intersection.min_cycle_length    or 40
+    max_c      = intersection.max_cycle_length    or 120
+    crossing_w = getattr(intersection, "crossing_width_m", 12.0) or 12.0
+    sat_flow   = effective_saturation_flow(intersection)
+
+    phases = group_phases(flows, directions)
+    proposed_C, proposed_splits = compute_timing(
+        flows, phases, lost_time, all_red, min_c, max_c, crossing_w, sat_flow,
+    )
+    after_offsets = _phase_offsets(phases, proposed_splits, lost_time, all_red)
+    after_program = SignalProgram(
+        cycle_length_s=proposed_C,
+        green_seconds={int(sid): float(g)  for sid, g  in proposed_splits.items()},
+        phase_offsets={int(sid): int(off)  for sid, off in after_offsets.items()},
+        lost_time_per_phase=float(lost_time),
+        all_red_clearance=float(all_red),
+    )
+
+    status = intersection.signal_status or "unsignalized"
+    if status in ("fixed_time", "actuated"):
+        exist_C    = intersection.existing_cycle_length or proposed_C
+        raw_splits = intersection.existing_green_splits or {}
+        exist_splits = (
+            {int(k): float(v) for k, v in raw_splits.items()}
+            if raw_splits
+            else {int(sid): exist_C / n_arms for sid in flows}
+        )
+    else:
+        # Unsignalized fallback: report MC against proposed-vs-proposed so the
+        # envelope reads ~zero saving (the label collapses to "marginal", which
+        # is honest - we can't replay a no-signal scenario in MC v1).
+        exist_C = proposed_C
+        exist_splits = {int(sid): float(g) for sid, g in proposed_splits.items()}
+
+    before_offsets = _phase_offsets(phases, exist_splits, lost_time, all_red)
+    before_program = SignalProgram(
+        cycle_length_s=int(exist_C),
+        green_seconds={int(sid): float(g)  for sid, g  in exist_splits.items()},
+        phase_offsets={int(sid): int(off)  for sid, off in before_offsets.items()},
+        lost_time_per_phase=float(lost_time),
+        all_red_clearance=float(all_red),
+    )
+
+    flows_int = {int(sid): float(q) for sid, q in flows.items()}
+    mc = monte_carlo_compare(
+        q_pcu_hr_per_approach=flows_int,
+        before_program=before_program,
+        after_program=after_program,
+        n_runs=DEFAULT_N_RUNS,
+        duration_sec=DEFAULT_DURATION_SEC,
+        sat_flow_pcu_hr=sat_flow,
+    )
+    vh = mc.vehicle_hours_saved
+
+    # MC simulates one hour. Scale linearly to window length so the envelope
+    # reads in the same units as the windowed Webster's total. Linear because
+    # we're projecting a single estimate to a longer window, not aggregating
+    # independent samples - the CI bounds scale with the mean.
+    window_hrs = max((end - start).total_seconds() / 3600.0, 0.0)
+    scaled_mean    = vh.mean      * window_hrs
+    scaled_std     = vh.std       * window_hrs
+    scaled_ci_low  = vh.ci_low_95 * window_hrs
+    scaled_ci_high = vh.ci_high_95 * window_hrs
+    scaled_per_run = [round(v * window_hrs, 4) for v in vh.per_run_means]
+
+    # Analytical reference for the window: Webster's deterministic vh_saved
+    # over the same period. Computed directly so we don't round-trip through
+    # compute_simulation_for_window (which also does the per-second delay sim).
+    total_flow = sum(flows.values())
+    if total_flow > 0 and proposed_C:
+        d_after = sum(
+            compute_uniform_delay(proposed_C, proposed_splits.get(int(sid), proposed_C / n_arms), q, sat_flow) * q
+            for sid, q in flows.items()
+        ) / total_flow
+        d_before = sum(
+            compute_uniform_delay(exist_C, exist_splits.get(int(sid), exist_C / n_arms), q, sat_flow) * q
+            for sid, q in flows.items()
+        ) / total_flow
+        analytical_vh_window = (d_before - d_after) * total_flow * window_hrs / 3600
+    else:
+        analytical_vh_window = 0.0
+
+    label, sentence = _confidence_label(scaled_mean, scaled_ci_low, scaled_ci_high)
+
+    # Per-approach labelling (street name + arm prefix). Same shape as
+    # _compute_chunk_mc's output so the badge UI can render either response
+    # interchangeably.
+    street_meta = {
+        row.id: (row.name, getattr(row, "arm_direction", None))
+        for row in (
+            db.query(models.Street)
+            .filter_by(intersection_id=intersection_id)
+            .all()
+        )
+    }
+    arm_short = {
+        "northbound": "NB", "southbound": "SB",
+        "eastbound":  "EB", "westbound":  "WB",
+    }
+    per_approach_payload: list[dict] = []
+    for approach_id, ba in mc.per_approach.items():
+        name, direction = street_meta.get(approach_id, (f"Approach {approach_id}", None))
+        short = arm_short.get(direction or "", "?")
+        prefix_dupe = (
+            direction is not None
+            and (
+                name.upper().startswith(f"{short} -")
+                or name.upper().startswith(f"{short}-")
+                or name.upper().startswith(f"{short} ")
+            )
+        )
+        label_str = f"{short} - {name}" if direction and not prefix_dupe else name
+        per_approach_payload.append({
+            "approach_id": approach_id,
+            "label":       label_str,
+            "flow_pcu_hr": round(float(flows_int[approach_id]), 2),
+            "before": {
+                "mean":       round(ba.before.mean,       4),
+                "std":        round(ba.before.std,        4),
+                "ci_low_95":  round(ba.before.ci_low_95,  4),
+                "ci_high_95": round(ba.before.ci_high_95, 4),
+                "n_runs":     ba.before.n_runs,
+            },
+            "after": {
+                "mean":       round(ba.after.mean,       4),
+                "std":        round(ba.after.std,        4),
+                "ci_low_95":  round(ba.after.ci_low_95,  4),
+                "ci_high_95": round(ba.after.ci_high_95, 4),
+                "n_runs":     ba.after.n_runs,
+            },
+        })
+    per_approach_payload.sort(
+        key=lambda r: r["before"]["mean"] - r["after"]["mean"], reverse=True,
+    )
+
+    # Sample replays for the visual playback. Same construction as chunk path.
+    N_SAMPLE_REPLAYS = 5
+    sample_replays_payload: list[dict] = []
+    duration_int = int(DEFAULT_DURATION_SEC)
+    for run_index in range(min(N_SAMPLE_REPLAYS, DEFAULT_N_RUNS)):
+        arrival_rng = _per_run_rng(42, run_index, stream=0)
+        reaction_rng = _per_run_rng(42, run_index, stream=2)
+        arrivals = _draw_arrivals(flows_int, DEFAULT_DURATION_SEC, arrival_rng)
+        sim_result = simulate_one_run(
+            arrivals_per_approach=arrivals,
+            signal_program=after_program,
+            sat_flow_pcu_hr=sat_flow,
+            duration_sec=DEFAULT_DURATION_SEC,
+            rng=reaction_rng,
+        )
+        bucketed: dict[str, list[float]] = {}
+        for approach_id, times in arrivals.items():
+            buckets = [0.0] * duration_int
+            for t in times:
+                idx = int(t)
+                if 0 <= idx < duration_int:
+                    buckets[idx] += 1.0
+            bucketed[str(approach_id)] = buckets
+        # Report each run's vh saved in window-total units, matching the
+        # outer envelope.
+        run_vh_saved_scaled = (
+            vh.per_run_means[run_index] * window_hrs
+            if run_index < len(vh.per_run_means) else 0.0
+        )
+        sample_replays_payload.append({
+            "run_index":  run_index,
+            "vh_saved":   round(float(run_vh_saved_scaled), 4),
+            "arrivals_per_second": bucketed,
+        })
+        if not sim_result:
+            logger.warning("window MC sample replay %d empty", run_index)
+
+    chunk_label = f"{start.strftime('%b %d %H:%M')} – {end.strftime('%H:%M')}"
+
+    return {
+        "intersection_id":          intersection_id,
+        "chunk_name":               chunk_label,
+        "duration_sec":             int((end - start).total_seconds()),
+        "n_runs":                   vh.n_runs,
+        "label":                    label,
+        "sentence":                 sentence,
+        "vehicle_hours_saved": {
+            "mean":       round(scaled_mean,    4),
+            "std":        round(scaled_std,     4),
+            "ci_low_95":  round(scaled_ci_low,  4),
+            "ci_high_95": round(scaled_ci_high, 4),
+            "n_runs":     vh.n_runs,
+        },
+        "per_run_means":            scaled_per_run,
+        "per_approach":             per_approach_payload,
+        "sample_replays":           sample_replays_payload,
+        "analytical_reference_vh":  round(analytical_vh_window, 4),
+        "cached":                   False,
+    }
+
+
+@router.post("/stochastic-confidence/compute", response_model=StochasticConfidenceResponse)
+def compute_stochastic_confidence_for_window(
+    body: ComputeRequest,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[models.User, Depends(get_current_user)],
+):
+    """Run Monte Carlo against a user-picked time window.
+
+    Pairs with `POST /simulation/compute` so the deterministic Webster's
+    sim and the stochastic 100-replay verdict cover the same window with
+    the same units (window-total vh_saved). Without this endpoint the
+    Confidence badge would still report a daily envelope while the rest of
+    the page is showing a windowed replay - the numbers wouldn't align.
+    """
+    intersection = db.get(models.Intersection, body.intersection_id)
+    if not intersection:
+        raise HTTPException(status_code=404, detail="Intersection not found")
+    if body.end <= body.start:
+        raise HTTPException(status_code=422, detail="end must be after start")
+
+    try:
+        payload = _compute_window_mc(db, intersection, body.start, body.end)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(
+            "compute_window_mc failed (intersection=%s window=%s..%s)",
+            body.intersection_id, body.start.isoformat(), body.end.isoformat(),
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Windowed stochastic confidence failed: {type(exc).__name__}: {exc}",
+        ) from exc
+
     return StochasticConfidenceResponse(**payload)

@@ -15,6 +15,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog';
 import { ArrowLeft, Plus, Trash2, Loader2, Pencil, Check, X, MapPin, MonitorPlay, Eye, EyeOff, RotateCcw, RefreshCw, WifiOff } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -158,6 +159,46 @@ function StreetRow({
         </>
       )}
     </div>
+  );
+}
+
+// ── Stream-health row ──────────────────────────────────────────────────────
+
+function HealthRow({
+  label, hint, state, value,
+}: {
+  label: string;
+  hint:  string;
+  state: 'ok' | 'warn' | 'bad';
+  value: string;
+}) {
+  const dotClass = state === 'ok'
+    ? 'bg-emerald-500'
+    : state === 'warn'
+      ? 'bg-amber-400'
+      : 'bg-rose-500';
+  const valueClass = state === 'ok'
+    ? 'text-emerald-700 dark:text-emerald-400'
+    : state === 'warn'
+      ? 'text-amber-700 dark:text-amber-400'
+      : 'text-rose-700 dark:text-rose-400';
+  return (
+    <li className="flex items-start gap-3 px-4 py-2.5">
+      <span className={cn('size-2 rounded-full shrink-0 mt-1', dotClass)} />
+      <div className="flex-1 min-w-0">
+        <div className="flex items-baseline justify-between gap-2 flex-wrap">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+            {label}
+          </p>
+          <p className={cn('text-[11px] font-mono tabular-nums', valueClass)}>
+            {value}
+          </p>
+        </div>
+        <p className="text-[11px] text-muted-foreground/80 mt-0.5 leading-snug">
+          {hint}
+        </p>
+      </div>
+    </li>
   );
 }
 
@@ -573,40 +614,78 @@ export function CameraDetailPage() {
             Live preview, detection regions, and stream health for this camera.
           </p>
         </div>
-        {cctv && (
-          <Badge
-            data-testid="badge-camera-status"
-            variant="outline"
-            className={cn(
-              'ml-2',
-              cctv.status === 'online' && 'border-emerald-500/40 text-emerald-600 bg-emerald-50',
-              cctv.status === 'offline' && 'border-destructive/40 text-destructive',
-            )}
-          >
-            {cctv.status}
-          </Badge>
-        )}
-        <Badge variant="outline" className={cn(
-          'text-[10px]',
-          wsStatus === 'live'         && 'border-emerald-500/40 text-emerald-600',
-          wsStatus === 'connecting'   && 'border-amber-500/40 text-amber-500',
-          wsStatus === 'reconnecting' && 'border-amber-500/40 text-amber-500',
-          wsStatus === 'error'        && 'border-destructive/40 text-destructive',
-        )}>
-          {wsStatus === 'live'         ? '● live'
-          : wsStatus === 'connecting'  ? '○ connecting'
-          : wsStatus === 'reconnecting'? '○ reconnecting'
-          : '✕ no stream'}
-        </Badge>
-        {workerLive !== null && (
-          <Badge variant="outline" className={cn(
-            'text-[10px]',
-            workerLive  && 'border-emerald-500/40 text-emerald-600',
-            !workerLive && 'border-destructive/40 text-destructive',
-          )}>
-            {workerLive ? '● worker' : '✕ worker offline'}
-          </Badge>
-        )}
+        {/* Single stream-health badge consolidating three layers that used to
+            sit as three competing badges (camera / websocket / worker). The
+            dominant state collapses to one verdict; the popover breaks it
+            apart so engineers can still diagnose which layer is broken. */}
+        {cctv && (() => {
+          const camStr   = cctv.status; // 'online' | 'offline' | 'reconnecting'
+          const wsStr    = wsStatus;    // 'live' | 'connecting' | 'reconnecting' | 'error'
+          const workerStr = workerLive === null ? 'unknown' : workerLive ? 'live' : 'offline';
+
+          // Worst layer wins. Red beats amber beats green.
+          const anyRed   = camStr === 'offline' || wsStr === 'error' || workerStr === 'offline';
+          const allGreen = camStr === 'online' && wsStr === 'live' && (workerStr === 'live' || workerStr === 'unknown');
+          const tone     = anyRed ? 'red' : allGreen ? 'green' : 'amber';
+
+          const verdictLabel = tone === 'green' ? '● Live'
+                              : tone === 'amber' ? '○ Degraded'
+                              : '✕ Offline';
+          const verdictClass = tone === 'green'
+            ? 'border-emerald-500/40 text-emerald-600 bg-emerald-50 dark:bg-emerald-950/30'
+            : tone === 'amber'
+              ? 'border-amber-500/40 text-amber-600 bg-amber-50 dark:bg-amber-950/30'
+              : 'border-destructive/40 text-destructive bg-destructive/10';
+
+          return (
+            <Popover>
+              <PopoverTrigger asChild>
+                <button
+                  type="button"
+                  data-testid="badge-camera-status"
+                  className={cn(
+                    'inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-medium ml-2 hover:opacity-80 transition-opacity',
+                    verdictClass,
+                  )}
+                  title="Stream health - click for layer breakdown"
+                >
+                  {verdictLabel}
+                </button>
+              </PopoverTrigger>
+              <PopoverContent align="end" className="w-72 p-0">
+                <div className="px-4 py-2.5 border-b border-border">
+                  <p className="text-[10px] uppercase tracking-wide font-semibold text-muted-foreground">
+                    Stream health
+                  </p>
+                  <p className="text-[11px] text-muted-foreground/80 mt-0.5 leading-snug">
+                    Three layers between the camera and your browser. The
+                    badge shows the worst.
+                  </p>
+                </div>
+                <ul className="flex flex-col divide-y divide-border text-xs">
+                  <HealthRow
+                    label="Camera"
+                    hint="RTSP feed reaching the worker"
+                    state={camStr === 'online' ? 'ok' : camStr === 'offline' ? 'bad' : 'warn'}
+                    value={camStr}
+                  />
+                  <HealthRow
+                    label="Worker"
+                    hint="Detection process consuming the feed"
+                    state={workerStr === 'live' ? 'ok' : workerStr === 'offline' ? 'bad' : 'warn'}
+                    value={workerStr}
+                  />
+                  <HealthRow
+                    label="Preview stream"
+                    hint="WebSocket pushing frames to this browser"
+                    state={wsStr === 'live' ? 'ok' : wsStr === 'error' ? 'bad' : 'warn'}
+                    value={wsStr}
+                  />
+                </ul>
+              </PopoverContent>
+            </Popover>
+          );
+        })()}
         <div className="flex rounded-md border border-border overflow-hidden shrink-0">
           <button
             type="button"

@@ -1315,8 +1315,7 @@ export function DualIntersectionCanvas({
   existingGreenSplits?: Record<string, number> | null;
   // When set, pins the canvas to one view (e.g. 'before' for "current state
   // only", 'dual' for the side-by-side) and hides the manual toggle.
-  // Callers like IntersectionStory use this so each story step has a
-  // distinct visual; null = the original interactive behaviour.
+  // null = the original interactive behaviour.
   lockedViewMode?: 'before' | 'dual' | 'after' | null;
 }) {
   const wrapperRef        = useRef<HTMLDivElement>(null);

@@ -7,10 +7,8 @@ import { simulationApi, type SimulationResponse } from '@/services/simulation';
 import { selectPeakChunk } from '@/lib/simulation';
 import { timingApi, type TimingChunk } from '@/services/timing';
 import type { Intersection, Street } from '@/types';
-import { Button } from '@/components/ui/button';
-import { Loader2, Printer } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 import { IntersectionSummary } from '@/components/IntersectionSummary';
-import { ConfidenceBadge } from '@/components/ConfidenceBadge';
 import { ARM_SHORT, GanttDiagram, LosBadge } from '@/components/signal-timing-viz';
 import {
   statusBucket, BUCKET_LABEL,
@@ -21,6 +19,250 @@ function fmt(n: number | null | undefined, unit = 's'): string {
   if (n == null) return '-';
   return `${n.toFixed(1)}${unit}`;
 }
+
+/**
+ * Print stylesheet for the Report tab.
+ *
+ * The web view is a stack of cards (border + bg + grid layouts). When the
+ * operator hits Print, the browser by default prints those cards verbatim,
+ * which reads as "screenshot of a web app" rather than "engineering report".
+ *
+ * This stylesheet rewrites the page for print into a traditional document:
+ *   - A4 page with 2 cm margins and a running footer (page n / total + title)
+ *   - Serif typography sized for letter prose, not UI screens
+ *   - Sections with underlined uppercase headings and CSS counter numbering
+ *   - Cards lose their borders/bg (becoming flat sections); grids collapse
+ *     into vertical flow so columns don't crowd narrow page widths
+ *   - Print-only tables for tabular data that was previously stat cards
+ *   - Page-break-avoid on each section so a Gantt or table doesn't split
+ *
+ * Why inline a <style> tag instead of a CSS file: this stylesheet only
+ * makes sense for the Report page (other tabs have their own print needs),
+ * scoping it with `.print-report` and inlining keeps the rule near its
+ * markup. The selectors deliberately target the wrapping class so global
+ * print rules elsewhere in the app aren't disturbed.
+ */
+/* Bundled body font for the printed report.
+ *
+ * Browser default web fonts (Georgia, Times) look generic and dated when
+ * the operator hits Print, which was the complaint about the first version.
+ * We pull Source Serif 4 (humanist serif designed by Adobe, MIT-licensed)
+ * and IBM Plex Sans (the de-facto modern report sans) from Google Fonts via
+ * @import so the page loads them once on render. If the print preview is
+ * offline the system stack (Charter / Iowan Old Style / Cambria / Palatino)
+ * still gives a credible serif fallback - none of those are Times.
+ *
+ * The fonts are scoped to the @media print block so we don't shift the
+ * web view's typography.
+ */
+const FONT_BODY = `"Source Serif 4", "Source Serif Pro", Charter, "Iowan Old Style", Cambria, Constantia, "Palatino Linotype", Palatino, Georgia, serif`;
+const FONT_HEAD = `"IBM Plex Sans", "Inter", "Helvetica Neue", Arial, sans-serif`;
+const FONT_MONO = `"IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace`;
+
+const PRINT_STYLES = `
+@import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+@media print {
+  @page {
+    size: A4;
+    margin: 18mm 16mm 22mm 16mm;
+
+    @bottom-left {
+      content: "Intersection Traffic Analysis Report";
+      font-family: ${FONT_HEAD};
+      font-size: 8.5pt;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+      color: #6b7280;
+    }
+    @bottom-right {
+      content: counter(page) " / " counter(pages);
+      font-family: ${FONT_MONO};
+      font-size: 8.5pt;
+      color: #6b7280;
+    }
+  }
+
+  /* Reset web chrome inside the print scope. */
+  .print-report {
+    font-family: ${FONT_BODY} !important;
+    font-size: 10.5pt;
+    line-height: 1.5;
+    color: #111 !important;
+    background: white !important;
+    counter-reset: section;
+    /* OpenType niceties - ligatures and proportional oldstyle figures
+       for body prose, tabular figures only where we explicitly opt in. */
+    font-feature-settings: "liga", "kern", "onum", "pnum";
+  }
+
+  .print-report * {
+    color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+
+  /* Cover / title block. */
+  .print-cover {
+    display: block !important;
+    border-bottom: 1.5pt solid #111;
+    padding-bottom: 12pt;
+    margin-bottom: 16pt;
+  }
+  .print-cover .doc-kind {
+    font-family: ${FONT_HEAD};
+    font-size: 8.5pt;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.22em;
+    color: #4b5563;
+    margin: 0 0 6pt 0;
+  }
+  .print-cover h1 {
+    font-family: ${FONT_BODY};
+    font-size: 24pt;
+    font-weight: 700;
+    margin: 0;
+    line-height: 1.05;
+    letter-spacing: -0.015em;
+  }
+  .print-cover .meta {
+    font-family: ${FONT_HEAD};
+    font-size: 9pt;
+    color: #374151;
+    margin-top: 10pt;
+    line-height: 1.5;
+  }
+  .print-cover .meta-row {
+    display: flex;
+    gap: 18pt;
+    flex-wrap: wrap;
+  }
+  .print-cover .meta-label {
+    color: #9ca3af;
+    margin-right: 5pt;
+    text-transform: uppercase;
+    font-size: 7.5pt;
+    letter-spacing: 0.08em;
+    font-weight: 600;
+  }
+
+  /* Numbered sections via CSS counter. Sans-serif heads make the hierarchy
+     pop against the serif body without looking academic-stuffy. */
+  .print-section {
+    counter-increment: section;
+    break-inside: avoid;
+    page-break-inside: avoid;
+    margin-top: 14pt;
+  }
+  .print-section > h2 {
+    font-family: ${FONT_HEAD};
+    font-size: 10.5pt;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: #111;
+    margin: 0 0 8pt 0;
+    padding-bottom: 4pt;
+    border-bottom: 0.5pt solid #9ca3af;
+  }
+  .print-section > h2::before {
+    content: counter(section, decimal-leading-zero) " — ";
+    color: #9ca3af;
+    font-weight: 500;
+  }
+
+  /* Subheadings inside summary sections. */
+  .print-report h3 {
+    font-family: ${FONT_HEAD};
+    font-size: 9.5pt;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #374151;
+    margin: 8pt 0 4pt 0;
+  }
+
+  /* Cards collapse to flat sections. */
+  .print-flat {
+    border: none !important;
+    background: white !important;
+    background-color: white !important;
+    padding: 0 !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+  }
+
+  /* Body prose */
+  .print-report p,
+  .print-report li,
+  .print-report dd {
+    font-family: ${FONT_BODY};
+    font-size: 10.5pt;
+    line-height: 1.55;
+    margin: 0 0 6pt 0;
+  }
+  .print-report dt {
+    font-family: ${FONT_HEAD};
+    font-size: 9pt;
+    font-weight: 600;
+    color: #374151;
+  }
+
+  /* Print-only tables - sans for clarity at small sizes, mono for numbers. */
+  .print-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: ${FONT_HEAD};
+    font-size: 9.5pt;
+    margin: 6pt 0 2pt 0;
+  }
+  .print-table th,
+  .print-table td {
+    text-align: left;
+    padding: 5pt 8pt;
+    border-bottom: 0.5pt solid #d1d5db;
+    vertical-align: top;
+  }
+  .print-table th {
+    border-bottom: 1pt solid #111;
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 8pt;
+    letter-spacing: 0.06em;
+    color: #4b5563;
+  }
+  .print-table td.num,
+  .print-table th.num {
+    text-align: right;
+    font-family: ${FONT_MONO};
+    font-variant-numeric: tabular-nums;
+    font-size: 9.5pt;
+  }
+
+  /* Force vertical flow inside report grids so columns don't squash on A4. */
+  .print-report .print-stack > * + * {
+    margin-top: 6pt;
+  }
+
+  /* Hide tinted backgrounds; we want a monochrome document feel. */
+  .print-report [class*="bg-emerald"],
+  .print-report [class*="bg-amber"],
+  .print-report [class*="bg-rose"],
+  .print-report [class*="bg-teal"],
+  .print-report [class*="bg-sky"],
+  .print-report [class*="bg-violet"],
+  .print-report [class*="bg-muted"] {
+    background: transparent !important;
+    background-color: transparent !important;
+  }
+
+  /* Keep large composite charts together. */
+  .print-section .print-keep {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+}
+`;
 
 export function IntersectionReportPage() {
   const { id } = useParams<{ id: string }>();
@@ -94,100 +336,197 @@ export function IntersectionReportPage() {
     greenSec: recommendedTiming?.green_splits[String(s.id)] ?? 0,
   }));
 
+  const generated = new Date().toLocaleString('en-PH', { timeZoneName: 'short' });
+
   return (
-    <div className="flex flex-col gap-5 print:gap-2">
-      {/* Tab-local action row - shell already shows Back/title/Analyse/Settings.
-          Only Print is tab-specific. */}
-      <div className="flex items-center justify-end gap-2 print:hidden">
-        <Button variant="outline" size="sm" onClick={() => window.print()}>
-          <Printer className="size-3.5 mr-1.5" />
-          Print / Export PDF
-        </Button>
-      </div>
+    <div className="print-report flex flex-col gap-5 print:gap-0">
+      <style>{PRINT_STYLES}</style>
 
-      {/* Print-only header */}
-      <div className="hidden print:block mb-3">
-        <h1 className="text-lg font-bold">{intersection.name} - Intersection Report</h1>
-        <p className="text-xs text-gray-500 mt-0.5">
-          Generated {new Date().toLocaleString('en-PH', { timeZoneName: 'short' })}
-          {' · '}{intersection.signal_status.replace('_', ' ')}
-          {bucket && ` · ${BUCKET_LABEL[bucket]}`}
-        </p>
-      </div>
-
-      {/* Key stats - the 3 numbers an operator needs to decide.
-          Total flow (PCU/hr) was cut: it's engineering jargon and the
-          plain veh/hr Major/Minor volume in Findings carries the same info. */}
-      {ds && (
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          <div className="rounded-lg border border-border bg-card p-4 print:p-3">
-            <p className="text-xs text-muted-foreground">Avg delay before</p>
-            <p className="text-xl font-semibold mt-1">{fmt(ds.avg_delay_before)}</p>
-            <div className="flex items-center gap-1.5 mt-1">
-              <p className="text-xs text-muted-foreground">per vehicle</p>
-              <LosBadge grade={ds.los_before} />
-            </div>
-          </div>
-          <div className="rounded-lg border border-border bg-card p-4 print:p-3">
-            <p className="text-xs text-muted-foreground">Avg delay after</p>
-            <p className="text-xl font-semibold mt-1 text-emerald-600">{fmt(ds.avg_delay_after)}</p>
-            <div className="flex items-center gap-1.5 mt-1">
-              <p className="text-xs text-muted-foreground">per vehicle</p>
-              <LosBadge grade={ds.los_after} />
-            </div>
-          </div>
-          <div className="rounded-lg border border-border bg-card p-4 print:p-3">
-            <p className="text-xs text-muted-foreground">Vehicle-hours saved</p>
-            <p className={cn('text-xl font-semibold mt-1', ds.total_vehicle_hours_saved > 0 && 'text-emerald-600')}>
-              {ds.total_vehicle_hours_saved.toFixed(1)} vh
-            </p>
-            <p className="text-xs text-muted-foreground mt-1">per day</p>
-          </div>
-        </div>
-      )}
-
-      {/* Stochastic confidence (Monte Carlo) — peak-chunk CI on vh saved.
-          Lazy fetch, Redis-cached server-side; full width to give the
-          plain-English sentence room to breathe. */}
-      {ds && ds.total_vehicle_hours_saved > 0 && (
-        <ConfidenceBadge intersectionId={interId} variant="card" />
-      )}
-
-      {/* Phase comparison - current vs recommended */}
-      {recommendedTiming && usableStreets.length > 0 && (
-        <div className="rounded-lg border border-border bg-card p-5 print:p-3 print:break-inside-avoid">
-          <h2 className="text-sm font-semibold mb-4 print:mb-2">Phase comparison{peak ? ` - ${peak.chunk_name}` : ''}</h2>
-          <div className="flex gap-6 flex-col sm:flex-row">
-            {intersection.existing_cycle_length && intersection.existing_green_splits ? (
-              <GanttDiagram
-                title="Current timing"
-                cycleLength={intersection.existing_cycle_length}
-                approaches={currentApproaches}
-              />
-            ) : (
-              <div className="flex-1 flex items-center justify-center py-8 rounded-md border border-dashed border-border text-xs text-muted-foreground text-center px-4">
-                No current timing entered.
-              </div>
+      {/* Print-only cover / title block. Replaces the inline "h1 + small p"
+          header with a proper document head: doc-kind label, intersection
+          name as the headline, then a metadata row with generated date,
+          signal status, and MUTCD verdict. */}
+      <header className="hidden print-cover">
+        <p className="doc-kind">Intersection Traffic Analysis Report</p>
+        <h1>{intersection.name}</h1>
+        <div className="meta">
+          <div className="meta-row">
+            <span><span className="meta-label">Generated</span>{generated}</span>
+            <span><span className="meta-label">Signal status</span>{intersection.signal_status.replace('_', ' ')}</span>
+            {bucket && (
+              <span><span className="meta-label">MUTCD verdict</span>{BUCKET_LABEL[bucket]}</span>
             )}
-            <div className="w-px bg-border hidden sm:block shrink-0" />
-            <GanttDiagram
-              title="Recommended (Webster)"
-              titleClassName="text-emerald-600"
-              cycleLength={recommendedTiming.cycle_length}
-              approaches={recommendedApproaches}
-            />
           </div>
         </div>
+      </header>
+
+      {/* Section 1: Findings - key stats. Web shows 3 stat cards; print shows
+          a compact two-column "metric / before / after" table for the same
+          numbers in document form. */}
+      <section className="print-section">
+        <h2 className="hidden print:block">Findings</h2>
+
+        {/* Web view: stat cards */}
+        {ds && (
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 print:hidden">
+            <div className="rounded-lg border border-border bg-card p-4">
+              <p className="text-xs text-muted-foreground">Avg delay before</p>
+              <p className="text-xl font-semibold mt-1">{fmt(ds.avg_delay_before)}</p>
+              <div className="flex items-center gap-1.5 mt-1">
+                <p className="text-xs text-muted-foreground">per vehicle</p>
+                <LosBadge grade={ds.los_before} />
+              </div>
+            </div>
+            <div className="rounded-lg border border-border bg-card p-4">
+              <p className="text-xs text-muted-foreground">Avg delay after</p>
+              <p className="text-xl font-semibold mt-1 text-emerald-600">{fmt(ds.avg_delay_after)}</p>
+              <div className="flex items-center gap-1.5 mt-1">
+                <p className="text-xs text-muted-foreground">per vehicle</p>
+                <LosBadge grade={ds.los_after} />
+              </div>
+            </div>
+            <div className="rounded-lg border border-border bg-card p-4">
+              <p className="text-xs text-muted-foreground">Vehicle-hours saved</p>
+              <p className={cn('text-xl font-semibold mt-1', ds.total_vehicle_hours_saved > 0 && 'text-emerald-600')}>
+                {ds.total_vehicle_hours_saved.toFixed(1)} vh
+              </p>
+              <p className="text-xs text-muted-foreground mt-1">per day</p>
+            </div>
+          </div>
+        )}
+
+        {/* Print view: metric table */}
+        {ds && (
+          <table className="hidden print:table print-table">
+            <thead>
+              <tr>
+                <th>Metric</th>
+                <th className="num">Before</th>
+                <th className="num">After</th>
+                <th className="num">Δ</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Average delay per vehicle</td>
+                <td className="num">{fmt(ds.avg_delay_before)}</td>
+                <td className="num">{fmt(ds.avg_delay_after)}</td>
+                <td className="num">
+                  {ds.avg_delay_after < ds.avg_delay_before ? '−' : '+'}
+                  {Math.abs(ds.avg_delay_before - ds.avg_delay_after).toFixed(1)} s
+                </td>
+              </tr>
+              <tr>
+                <td>Level of service (LOS)</td>
+                <td className="num">{ds.los_before}</td>
+                <td className="num">{ds.los_after}</td>
+                <td className="num">{ds.los_before === ds.los_after ? '—' : `${ds.los_before} → ${ds.los_after}`}</td>
+              </tr>
+              <tr>
+                <td>Vehicle-hours saved per day</td>
+                <td className="num" colSpan={2}>—</td>
+                <td className="num">
+                  {ds.total_vehicle_hours_saved >= 0 ? '+' : ''}
+                  {ds.total_vehicle_hours_saved.toFixed(1)} vh
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        )}
+      </section>
+
+      {/* Section 2: Phase comparison - current vs Webster-recommended Gantt. */}
+      {recommendedTiming && usableStreets.length > 0 && (
+        <section className="print-section">
+          <h2 className="hidden print:block">Phase Comparison{peak ? ` - ${peak.chunk_name}` : ''}</h2>
+
+          {/* Web heading hidden in print to avoid double heading. */}
+          <div className="rounded-lg border border-border bg-card p-5 print:print-flat print-keep">
+            <h2 className="text-sm font-semibold mb-4 print:hidden">Phase comparison{peak ? ` - ${peak.chunk_name}` : ''}</h2>
+            <div className="flex gap-6 flex-col sm:flex-row print:flex-row">
+              {intersection.existing_cycle_length && intersection.existing_green_splits ? (
+                <GanttDiagram
+                  title="Current timing"
+                  cycleLength={intersection.existing_cycle_length}
+                  approaches={currentApproaches}
+                />
+              ) : (
+                <div className="flex-1 flex items-center justify-center py-8 rounded-md border border-dashed border-border text-xs text-muted-foreground text-center px-4">
+                  No current timing entered.
+                </div>
+              )}
+              <div className="w-px bg-border hidden sm:block shrink-0 print:hidden" />
+              <GanttDiagram
+                title="Recommended (Webster)"
+                titleClassName="text-emerald-600"
+                cycleLength={recommendedTiming.cycle_length}
+                approaches={recommendedApproaches}
+              />
+            </div>
+          </div>
+        </section>
       )}
 
-      {/* Findings + Recommendations/Conclusion - decomposed for the printed report */}
-      <IntersectionSummary
-        intersection={intersection}
-        streets={streets}
-        sim={sim}
-        rec={rec}
-        variant="decomposed"
-      />
+      {/* Section 3 + 4: Findings narrative + Recommendations/Conclusion.
+          Wrapped so the IntersectionSummary's existing sections each get
+          a numbered heading in print and lose their card chrome. */}
+      <section className="print-section">
+        <h2 className="hidden print:block">Detailed Findings</h2>
+        <div className="print:print-flat">
+          <IntersectionSummary
+            intersection={intersection}
+            streets={streets}
+            sim={sim}
+            rec={rec}
+            variant="decomposed"
+          />
+        </div>
+      </section>
+
+      {/* Section 5: Methodology - print-only boilerplate so the document
+          stands on its own when read offline. */}
+      <section className="hidden print:block print-section">
+        <h2>Methodology</h2>
+        <p>
+          Vehicle counts were collected from CCTV detections classified by a
+          convolutional neural network. The MUTCD warrant analysis (W1
+          eight-hour volume, W2 four-hour volume, W4 pedestrian) was applied
+          to the resulting hourly volumes to determine whether the
+          intersection meets the conditions for signalisation.
+        </p>
+        <p>
+          Signal timing optimisation followed Webster's 1958 formula: the
+          cycle length minimises total intersection delay across the demand
+          observed at each approach, and per-approach green time is allocated
+          in proportion to the demand-to-capacity ratio. Average delay per
+          vehicle (s/veh) and Level of Service (LOS) are reported per the
+          Highway Capacity Manual, 6th Edition.
+        </p>
+        <p>
+          A 100-replay Monte Carlo simulation was run against the proposed
+          timing using stochastic arrival processes seeded by the observed
+          arrival rates. The 95% confidence interval reported above
+          represents the t-interval over the per-replay vehicle-hours saved.
+        </p>
+      </section>
+
+      {/* Section 6: Limitations / data caveats. */}
+      <section className="hidden print:block print-section">
+        <h2>Limitations</h2>
+        <p>
+          Detections are sampled from CCTV feeds covering the inbound
+          approaches only; turn movements are not separated. Saturation flow
+          uses the Highway Capacity Manual default of 1,900 PCU/hr/lane
+          adjusted for the configured passenger-car-equivalent mix.
+        </p>
+        <p>
+          For unsignalized intersections lacking a recorded existing cycle
+          length, the "before" condition uses a gap-acceptance model
+          (HCM 6th Ed. TWSC). Webster's projected savings should be treated
+          as an order-of-magnitude estimate until the recommended timing is
+          deployed and re-measured.
+        </p>
+      </section>
     </div>
   );
 }

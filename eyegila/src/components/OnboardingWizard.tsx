@@ -44,13 +44,19 @@ const DIRECTIONS: { value: ArmDirection; label: string }[] = [
 const DEFAULT_DIR_ORDER: ArmDirection[] = ['northbound', 'southbound', 'eastbound', 'westbound', 'unknown'];
 
 const WIZARD_STEPS = [
-  { id: 'welcome',    label: 'Preview'       },
+  // Welcome step removed - it was a placeholder ("Demo preview will appear
+  // here once ... is implemented") that added a click before the operator
+  // could do anything real. The Find cameras step is now the entry point.
+  //
+  // Timing step also removed - the intersection Settings sheet (cog icon
+  // in the shell) now owns the signal + cycle + splits editor, and the
+  // wizard's copy of that form was near-identical. Setup ends at Collecting
+  // and the operator can enter timing on their own schedule from Settings.
   { id: 'discover',  label: 'Find cameras'  },
   { id: 'group',     label: 'Group by IP'   },
   { id: 'name',      label: 'Name & pin'    },
   { id: 'assign',    label: 'Directions'    },
   { id: 'regions',   label: 'Draw regions'  },
-  { id: 'timing',    label: 'Enter timing'  },
   { id: 'collecting',label: 'Collecting'    },
 ] as const;
 
@@ -152,7 +158,7 @@ export interface OnboardingWizardProps {
 
 export function OnboardingWizard({ open, initialStep, onClose }: OnboardingWizardProps) {
   const navigate = useNavigate();
-  const [stepId, setStepId]   = useState<WizardStepId>('welcome');
+  const [stepId, setStepId]   = useState<WizardStepId>('discover');
   const [saving, setSaving]   = useState(false);
   const [creating, setCreating] = useState(false);
 
@@ -202,12 +208,8 @@ export function OnboardingWizard({ open, initialStep, onClose }: OnboardingWizar
   const [regionTargetId, setRegionTargetId] = useState<number | null>(null);
 
   // ── Timing step state ─────────────────────────────────────────────────────
-  const [timingTargetId, setTimingTargetId]       = useState<number | null>(null);
-  const [timingApproaches, setTimingApproaches]   = useState<string[]>([]);
-  const [timingStatus, setTimingStatus]           = useState<'unsignalized' | 'fixed_time' | 'actuated'>('fixed_time');
-  const [timingCycle, setTimingCycle]             = useState('90');
-  const [timingGreenSplits, setTimingGreenSplits] = useState<Record<string, string>>({});
-  const [timingLoading, setTimingLoading]         = useState(false);
+  // Timing-step state removed with the step itself. Signal + cycle + splits
+  // are edited in the Settings sheet post-onboarding.
 
   // ── Collecting step state ──────────────────────────────────────────────────
   const [collectingTargetId, setCollectingTargetId]         = useState<number | null>(null);
@@ -217,7 +219,7 @@ export function OnboardingWizard({ open, initialStep, onClose }: OnboardingWizar
 
   useEffect(() => {
     if (open) {
-      setStepId(isValidStepId(initialStep) ? initialStep : 'welcome');
+      setStepId(isValidStepId(initialStep) ? initialStep : 'discover');
     }
   }, [open, initialStep]);
 
@@ -287,56 +289,7 @@ export function OnboardingWizard({ open, initialStep, onClose }: OnboardingWizar
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, stepId]);
 
-  // Initialise timing step when entering it
-  useEffect(() => {
-    if (!open || stepId !== 'timing') return;
-
-    async function initTiming() {
-      setTimingLoading(true);
-      try {
-        let targetId = createdIntersectionId;
-        if (targetId == null) {
-          const inters = await intersectionsApi.list();
-          if (inters.length > 0) {
-            targetId = inters.sort((a, b) => b.time.localeCompare(a.time))[0].id;
-          }
-        }
-        if (targetId == null) return;
-        setTimingTargetId(targetId);
-
-        const [inter, streets] = await Promise.all([
-          intersectionsApi.get(targetId),
-          streetsApi.list(),
-        ]);
-
-        const approachDirs = streets
-          .filter(s => s.intersection_id === targetId && s.arm_direction !== 'unknown')
-          .map(s => s.arm_direction);
-        const approaches = [...new Set(approachDirs)];
-        setTimingApproaches(approaches);
-
-        if (inter.signal_status) setTimingStatus(inter.signal_status);
-        const cycle = inter.existing_cycle_length ?? 90;
-        setTimingCycle(String(cycle));
-
-        const defaultGreen = Math.round(cycle / Math.max(approaches.length, 1));
-        const splits: Record<string, string> = {};
-        for (const dir of approaches) {
-          splits[dir] = inter.existing_green_splits?.[dir] != null
-            ? String(inter.existing_green_splits[dir])
-            : String(defaultGreen);
-        }
-        setTimingGreenSplits(splits);
-      } catch {
-        toast.error('Failed to load intersection data');
-      } finally {
-        setTimingLoading(false);
-      }
-    }
-
-    initTiming();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, stepId]);
+  // (Timing step init effect removed with the step.)
 
   // Initialise collecting step when entering it
   useEffect(() => {
@@ -345,7 +298,7 @@ export function OnboardingWizard({ open, initialStep, onClose }: OnboardingWizar
     async function initCollecting() {
       setCollectingLoading(true);
       try {
-        let targetId = createdIntersectionId ?? timingTargetId ?? regionTargetId;
+        let targetId = createdIntersectionId ?? regionTargetId;
         if (targetId == null) {
           const inters = await intersectionsApi.list();
           if (inters.length > 0) {
@@ -623,28 +576,6 @@ export function OnboardingWizard({ open, initialStep, onClose }: OnboardingWizar
       await goTo(nextStep);
     } else if (stepId === 'assign') {
       await createIntersectionAndAdvance();
-    } else if (stepId === 'timing') {
-      if (timingTargetId == null) { toast.error('No intersection found'); return; }
-      const cycle = timingStatus !== 'unsignalized' ? parseInt(timingCycle) || null : null;
-      const splits: Record<string, number> | null =
-        timingStatus !== 'unsignalized' && cycle != null
-          ? Object.fromEntries(
-              Object.entries(timingGreenSplits).map(([k, v]) => [k, parseInt(v) || 0]),
-            )
-          : null;
-      setCreating(true);
-      try {
-        await intersectionsApi.patchTiming(timingTargetId, {
-          signal_status: timingStatus,
-          existing_cycle_length: cycle,
-          existing_green_splits: splits,
-        });
-        await goTo(nextStep);
-      } catch (err: unknown) {
-        toast.error(err instanceof Error ? err.message : 'Failed to save timing');
-      } finally {
-        setCreating(false);
-      }
     } else {
       await goTo(nextStep);
     }
@@ -679,13 +610,10 @@ export function OnboardingWizard({ open, initialStep, onClose }: OnboardingWizar
           </button>
         </div>
 
-        {/* Step pill */}
-        <div className="px-4 pt-3 pb-0">
-          <span className="text-[11px] text-muted-foreground font-medium">Step {stepIndex + 1} of {WIZARD_STEPS.length}</span>
-        </div>
-
-        {/* Instructions */}
-        <p className="px-4 py-2 text-xs text-muted-foreground leading-relaxed">
+        {/* Instructions - the "Step X of N" pill was removed; the minimized
+            regions panel already lives in the "Draw regions" step so the
+            wizard's step context is implicit. */}
+        <p className="px-4 py-3 text-xs text-muted-foreground leading-relaxed">
           Open each camera below and draw a counting polygon on the live video frame.
           Click the first point again (green dot) to close the polygon and save the region.
         </p>
@@ -847,46 +775,25 @@ export function OnboardingWizard({ open, initialStep, onClose }: OnboardingWizar
       <div className="flex-1 overflow-y-auto">
         <div className="max-w-2xl mx-auto px-8 py-10">
 
-          {/* ── Welcome ─────────────────────────────────────────────────────── */}
-          {stepId === 'welcome' && (
-            <div className="flex flex-col gap-6">
-              <div>
-                <h2 className="text-2xl font-semibold">Welcome to EyeGila</h2>
-                <p className="text-muted-foreground mt-2">
-                  This wizard guides you through setting up traffic monitoring. Below is a preview
-                  of the warrant evidence chart, timing comparison, and simulation you'll see once
-                  your cameras are collecting data.
-                </p>
-              </div>
-              <div className="rounded-xl border border-border bg-muted/30 p-12 flex flex-col items-center gap-4 text-center">
-                <p className="text-sm text-muted-foreground">
-                  Demo preview will appear here once warrant chart (Issue #7), timing comparison
-                  (Issue #8), and simulation (Issue #9) are implemented.
-                </p>
-              </div>
-              <p className="text-sm text-muted-foreground">
-                Click <strong>Next</strong> to start connecting your cameras.
-              </p>
-            </div>
-          )}
-
           {/* ── Discover ─────────────────────────────────────────────────────── */}
           {stepId === 'discover' && (
             <div className="flex flex-col gap-6">
               <div>
                 <h2 className="text-2xl font-semibold">Find your cameras</h2>
-                <p className="text-muted-foreground mt-2 inline-flex items-center gap-1 flex-wrap">
-                  Scan the local network for <span className="inline-flex items-center gap-0.5">ONVIF<JargonTip term="onvif" /></span>
-                  cameras, query an <span className="inline-flex items-center gap-0.5">NVR/DVR<JargonTip term="nvr" /></span>,
-                  or add a camera by pasting its <span className="inline-flex items-center gap-0.5">RTSP URL<JargonTip term="rtsp" /></span> directly.
+                <p className="text-muted-foreground mt-2 leading-relaxed">
+                  Scan the local network to auto-detect
+                  {' '}<span className="inline-flex items-center gap-0.5">ONVIF<JargonTip term="onvif" /></span>
+                  {' '}cameras, or add one by
+                  {' '}<span className="inline-flex items-center gap-0.5">RTSP URL<JargonTip term="rtsp" /></span>
+                  {' '}below.
                 </p>
               </div>
 
-              {/* ONVIF scan */}
+              {/* ONVIF scan - primary CTA. Kept the "Scanning…" label on the
+                  button (single source of the running-status word) and left
+                  the rotating scan-phase text below as the only status line
+                  so the user sees one animated indicator, not two. */}
               <div className="flex flex-col gap-2">
-                <p className="text-sm text-muted-foreground">
-                  Scan the local network for ONVIF cameras (takes ~3 seconds).
-                </p>
                 <Button
                   onClick={scanNetwork}
                   disabled={scanning}
@@ -896,7 +803,7 @@ export function OnboardingWizard({ open, initialStep, onClose }: OnboardingWizar
                   {scanning
                     ? <Loader2 className="size-4 mr-2 animate-spin" />
                     : <ScanSearch className="size-4 mr-2" />}
-                  {scanning ? 'Scanning network…' : 'Scan Network'}
+                  {scanning ? 'Scanning…' : 'Scan network'}
                 </Button>
                 {scanning && (
                   <div className="flex items-center gap-2 text-xs text-muted-foreground font-mono">
@@ -1322,7 +1229,7 @@ export function OnboardingWizard({ open, initialStep, onClose }: OnboardingWizar
                   )}
                 </div>
 
-                <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                <div className="flex items-center gap-3 text-xs text-muted-foreground flex-wrap">
                   <Button
                     variant="ghost"
                     size="sm"
@@ -1335,6 +1242,18 @@ export function OnboardingWizard({ open, initialStep, onClose }: OnboardingWizar
                   <Button variant="outline" size="sm" onClick={() => setRegionsMinimized(true)}>
                     Minimize to corner
                   </Button>
+                  {/* Explicit "Skip for now" - dropping this step doesn't
+                      block detection, only the counting-polygon filter, so
+                      the operator can safely defer it without losing data. */}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => goTo('collecting')}
+                    className="text-muted-foreground hover:text-foreground"
+                  >
+                    Skip for now
+                    <ArrowRight className="size-3.5 ml-1" />
+                  </Button>
                   <span className="ml-auto">
                     Opening a camera leaves the wizard running - come back here to continue.
                   </span>
@@ -1342,190 +1261,6 @@ export function OnboardingWizard({ open, initialStep, onClose }: OnboardingWizar
               </div>
             );
           })()}
-
-          {/* ── Timing ───────────────────────────────────────────────────── */}
-          {stepId === 'timing' && (
-            <div className="flex flex-col gap-6">
-              <div>
-                <h2 className="text-2xl font-semibold">Enter current signal timing</h2>
-                <p className="text-muted-foreground mt-2">
-                  Enter the existing signal cycle length and green time per approach.
-                  The phase diagram updates live as you type.
-                </p>
-              </div>
-
-              {timingLoading ? (
-                <div className="flex items-center gap-2 text-sm text-muted-foreground py-4">
-                  <Loader2 className="size-4 animate-spin" />
-                  Loading intersection data…
-                </div>
-              ) : (
-                <>
-                  {/* Signal status toggle */}
-                  <div className="flex flex-col gap-2">
-                    <Label className="inline-flex items-center gap-1">
-                      Signal status <JargonTip term="signal_status" />
-                    </Label>
-                    <div className="flex gap-2 flex-wrap">
-                      {(['unsignalized', 'fixed_time', 'actuated'] as const).map(s => (
-                        <button
-                          key={s}
-                          type="button"
-                          onClick={() => setTimingStatus(s)}
-                          className={cn(
-                            'px-3 py-1.5 rounded-lg text-sm border transition-colors',
-                            timingStatus === s
-                              ? 'bg-primary text-primary-foreground border-primary'
-                              : 'border-border bg-background hover:bg-muted text-muted-foreground',
-                          )}
-                        >
-                          {s === 'unsignalized' ? 'Unsignalized' : s === 'fixed_time' ? 'Fixed time' : 'Actuated'}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {timingStatus !== 'unsignalized' && (
-                    <>
-                      {/* Cycle length */}
-                      <div className="flex flex-col gap-2">
-                        <Label htmlFor="timing-cycle" className="inline-flex items-center gap-1">
-                          Cycle length <JargonTip term="cycle_length" />
-                        </Label>
-                        <div className="flex items-center gap-2">
-                          <Input
-                            id="timing-cycle"
-                            type="number"
-                            min={30}
-                            max={300}
-                            value={timingCycle}
-                            onChange={e => setTimingCycle(e.target.value)}
-                            className="w-28"
-                          />
-                          <span className="text-sm text-muted-foreground">seconds</span>
-                        </div>
-                      </div>
-
-                      {/* Green splits table */}
-                      {timingApproaches.length > 0 && (
-                        <div className="flex flex-col gap-2">
-                          <Label className="inline-flex items-center gap-1">
-                            Green time per approach <JargonTip term="green_split" />
-                          </Label>
-                          <div className="rounded-lg border border-border overflow-hidden">
-                            <table className="w-full text-sm">
-                              <thead>
-                                <tr className="bg-muted/40 border-b border-border">
-                                  <th className="px-4 py-2 text-left font-medium text-muted-foreground">Approach</th>
-                                  <th className="px-4 py-2 text-left font-medium text-muted-foreground">Green (s)</th>
-                                  <th className="px-4 py-2 text-left font-medium text-muted-foreground">% of cycle</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {timingApproaches.map(dir => {
-                                  const cycleN = parseInt(timingCycle) || 90;
-                                  const green  = parseInt(timingGreenSplits[dir] ?? '0') || 0;
-                                  const pct    = cycleN > 0 ? Math.round((green / cycleN) * 100) : 0;
-                                  return (
-                                    <tr key={dir} className="border-b border-border last:border-0">
-                                      <td className="px-4 py-2 font-medium capitalize">
-                                        {dir.replace('bound', '')}
-                                      </td>
-                                      <td className="px-4 py-2">
-                                        <Input
-                                          type="number"
-                                          min={1}
-                                          max={Math.max(1, (parseInt(timingCycle) || 90) - 3)}
-                                          value={timingGreenSplits[dir] ?? ''}
-                                          onChange={e => setTimingGreenSplits(prev => ({
-                                            ...prev, [dir]: e.target.value,
-                                          }))}
-                                          className="h-7 w-20"
-                                        />
-                                      </td>
-                                      <td className="px-4 py-2 text-muted-foreground tabular-nums">
-                                        {pct}%
-                                      </td>
-                                    </tr>
-                                  );
-                                })}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Live Gantt phase diagram */}
-                      {timingApproaches.length > 0 && (
-                        <div className="flex flex-col gap-2">
-                          <Label>Phase diagram</Label>
-                          <div className="rounded-lg border border-border bg-muted/10 p-4 flex flex-col gap-2">
-                            {timingApproaches.map(dir => {
-                              const cycleN  = parseInt(timingCycle) || 90;
-                              const yellowS = 3;
-                              const greenS  = Math.min(
-                                Math.max(0, parseInt(timingGreenSplits[dir] ?? '0') || 0),
-                                cycleN - yellowS,
-                              );
-                              const redS    = Math.max(0, cycleN - greenS - yellowS);
-                              const gPct    = (greenS  / cycleN) * 100;
-                              const yPct    = (yellowS / cycleN) * 100;
-                              const rPct    = (redS    / cycleN) * 100;
-                              return (
-                                <div key={dir} className="flex items-center gap-3">
-                                  <span className="w-16 text-xs text-muted-foreground capitalize shrink-0 text-right">
-                                    {dir.replace('bound', '')}
-                                  </span>
-                                  <div className="flex-1 flex h-7 rounded overflow-hidden text-[10px] font-medium">
-                                    <div
-                                      style={{ width: `${gPct}%` }}
-                                      className="bg-emerald-500 flex items-center justify-center text-white shrink-0"
-                                    >
-                                      {greenS > 6 ? `${greenS}s` : ''}
-                                    </div>
-                                    <div
-                                      style={{ width: `${yPct}%` }}
-                                      className="bg-amber-400 shrink-0"
-                                    />
-                                    <div
-                                      style={{ width: `${rPct}%` }}
-                                      className="bg-rose-500/70 flex items-center justify-center text-white shrink-0"
-                                    >
-                                      {redS > 6 ? `${redS}s` : ''}
-                                    </div>
-                                  </div>
-                                </div>
-                              );
-                            })}
-                            <div className="flex items-center gap-4 mt-1 pt-2 border-t border-border/50">
-                              <div className="w-16 shrink-0" />
-                              <div className="flex gap-4 text-[10px] text-muted-foreground">
-                                <span className="flex items-center gap-1">
-                                  <span className="inline-block size-2.5 rounded-sm bg-emerald-500" />Green
-                                </span>
-                                <span className="flex items-center gap-1">
-                                  <span className="inline-block size-2.5 rounded-sm bg-amber-400" />Yellow (3s)
-                                </span>
-                                <span className="flex items-center gap-1">
-                                  <span className="inline-block size-2.5 rounded-sm bg-rose-500/70" />Red
-                                </span>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      )}
-
-                      {timingApproaches.length === 0 && (
-                        <p className="text-sm text-muted-foreground">
-                          No approaches found. Complete the camera direction step first.
-                        </p>
-                      )}
-                    </>
-                  )}
-                </>
-              )}
-            </div>
-          )}
 
           {/* ── Collecting ───────────────────────────────────────────────────── */}
           {stepId === 'collecting' && (
@@ -1535,6 +1270,17 @@ export function OnboardingWizard({ open, initialStep, onClose }: OnboardingWizar
                 <p className="text-muted-foreground mt-2">
                   Your cameras are now counting vehicles. The system needs at least 8 qualifying
                   hours of data to run a MUTCD warrant analysis and generate timing recommendations.
+                </p>
+                {/* Bridge for the two skipped steps. Both regions and existing
+                    signal timing have new homes; the operator doesn't have to
+                    come back to this wizard for either. */}
+                <p className="text-xs text-muted-foreground mt-3 leading-relaxed">
+                  <strong className="text-foreground">Next steps you can take on your own:</strong>
+                  <br />
+                  · Open the Cameras page to draw counting polygons on any camera you skipped.
+                  <br />
+                  · Open the intersection and click the Settings cog to enter the existing signal
+                  {' '}cycle length and green splits (needed for the &quot;before&quot; comparison).
                 </p>
               </div>
 
