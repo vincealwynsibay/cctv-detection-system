@@ -87,6 +87,24 @@ const LABEL_TEXT: Record<StochasticConfidenceResponse['label'], string> = {
   marginal: 'Marginal',
 };
 
+const LABEL_TEXT_SHORT: Record<StochasticConfidenceResponse['label'], string> = {
+  high:     'High',
+  moderate: 'Moderate',
+  marginal: 'Marginal',
+};
+
+const LABEL_COLOR: Record<StochasticConfidenceResponse['label'], string> = {
+  high:     'text-emerald-600',
+  moderate: 'text-amber-600',
+  marginal: 'text-rose-600',
+};
+
+const LABEL_SUBTEXT: Record<StochasticConfidenceResponse['label'], string> = {
+  high:     'replays tightly clustered',
+  moderate: 'some spread across replays',
+  marginal: 'wide spread, benefit uncertain',
+};
+
 interface Props {
   intersectionId: number;
   /**
@@ -97,7 +115,7 @@ interface Props {
    *                 verdict and the confidence read as one block.
    *   * 'inline'  - tiny pill for placing beside a vh_saved number.
    */
-  variant?: 'card' | 'section' | 'inline';
+  variant?: 'card' | 'section' | 'inline' | 'stat';
   /**
    * Optional time window. When set, runs MC against that window via
    * `/simulation/stochastic-confidence/compute` so the envelope reads in
@@ -153,9 +171,61 @@ export function ConfidenceBadge({ intersectionId, variant = 'card', window }: Pr
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [intersectionId, windowKey]);
 
-  if (variant === 'card' || variant === 'section') {
-    // Shared body: section omits the outer wrapper so it can sit inside an
-    // existing card; card adds the border + bg so it can live on its own.
+  if (variant === 'section') {
+    // Large-format render for embedding inside the analysis box.
+    // Matches the visual weight of the stat row above it.
+    return (
+      <div className="flex flex-col">
+        <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wide inline-flex items-center gap-1 mb-2">
+          Simulation confidence (Monte Carlo) <JargonTip term="monte_carlo" />
+        </p>
+        {loading ? (
+          <div className="flex items-center gap-1.5 text-muted-foreground text-sm">
+            <Loader2 className="size-3.5 animate-spin" />
+            Running 100 simulations…
+          </div>
+        ) : error ? (
+          <p className="text-sm text-muted-foreground italic">Not available</p>
+        ) : data ? (
+          <>
+            <div className="flex items-center gap-3 mt-1">
+              <span
+                className={cn(
+                  'inline-flex items-center px-3 py-1 rounded-md text-sm font-bold',
+                  LABEL_STYLE[data.label],
+                )}
+              >
+                {LABEL_TEXT[data.label]}
+              </span>
+              <p className="text-sm text-muted-foreground leading-snug">
+                {data.sentence}
+              </p>
+            </div>
+            <details className="mt-4 group print:hidden">
+              <summary className="cursor-pointer text-xs font-medium text-muted-foreground hover:text-foreground select-none list-none inline-flex items-center gap-1.5">
+                <span className="inline-block transition-transform group-open:rotate-90">▸</span>
+                Show the {data.per_run_means.length} simulation replays
+              </summary>
+              <div className="mt-4 space-y-4">
+                {data.per_approach.length > 0 && (
+                  <PerApproachTable rows={data.per_approach} />
+                )}
+                <SimulationStripPlot
+                  perRunMeans={data.per_run_means}
+                  mean={data.vehicle_hours_saved.mean}
+                  ciLow={data.vehicle_hours_saved.ci_low_95}
+                  ciHigh={data.vehicle_hours_saved.ci_high_95}
+                  analyticalRef={data.analytical_reference_vh}
+                />
+              </div>
+            </details>
+          </>
+        ) : null}
+      </div>
+    );
+  }
+
+  if (variant === 'card') {
     const body = (
       <>
         <div className="flex items-center gap-1">
@@ -189,18 +259,12 @@ export function ConfidenceBadge({ intersectionId, variant = 'card', window }: Pr
             <p className="text-xs text-muted-foreground mt-1.5 leading-snug">
               {data.sentence}
             </p>
-
-            {/* Default-closed disclosure of the raw 100-run distribution.
-                Operator never sees it; the panel can expand during defense.
-                <details> is native, accessible, and works without extra state. */}
             <details className="mt-3 group print:hidden">
               <summary className="cursor-pointer text-[11px] text-muted-foreground hover:text-foreground select-none list-none inline-flex items-center gap-1">
                 <span className="inline-block transition-transform group-open:rotate-90">▸</span>
                 Show the {data.per_run_means.length} simulations
               </summary>
               <div className="mt-3 space-y-4">
-                {/* Per-approach delay table. Exposes which approach the savings
-                    actually come from; the 100-run aggregate above hides this. */}
                 {data.per_approach.length > 0 && (
                   <PerApproachTable rows={data.per_approach} />
                 )}
@@ -217,10 +281,34 @@ export function ConfidenceBadge({ intersectionId, variant = 'card', window }: Pr
         ) : null}
       </>
     );
-    if (variant === 'section') return <div className="flex flex-col">{body}</div>;
     return (
       <div className="rounded-lg border border-border bg-card p-4 print:p-3">
         {body}
+      </div>
+    );
+  }
+
+  // Stat variant - large label matching the stat row grid (text-[20px] font-black).
+  if (variant === 'stat') {
+    if (loading) {
+      return (
+        <span className="inline-flex items-center gap-1 text-sm text-muted-foreground">
+          <Loader2 className="size-3 animate-spin" />
+        </span>
+      );
+    }
+    if (error || !data) return <span className="text-[20px] font-black text-muted-foreground">-</span>;
+    return (
+      <div className="flex flex-col gap-0.5">
+        <span
+          className={cn('text-[20px] font-black tabular-nums leading-none', LABEL_COLOR[data.label])}
+          style={{ fontFamily: "'Space Grotesk', sans-serif" }}
+        >
+          {LABEL_TEXT_SHORT[data.label]}
+        </span>
+        <span className="text-[10px] text-muted-foreground leading-snug">
+          {LABEL_SUBTEXT[data.label]}
+        </span>
       </div>
     );
   }

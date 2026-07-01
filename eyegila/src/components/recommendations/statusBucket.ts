@@ -25,7 +25,11 @@ export function statusBucket(rec: RecommendationResponse): StatusBucket {
   const anyWarrantMet =
     rec.warrant_1_met || rec.warrant_2_met || rec.warrant_4_met ||
     !!rec.w_local_1_met || !!rec.w_local_2_met || !!rec.w_local_3_met;
-  if (rec.recommended && anyWarrantMet) return 'warranted';
+  // Trust the individual warrant heads - they are the MUTCD gate. The CNN's
+  // overall `recommended` flag can disagree with per-warrant heads (independent
+  // output heads); we already guard the opposite edge case (recommended=true,
+  // no warrant met) by not promoting that to 'warranted'.
+  if (anyWarrantMet) return 'warranted';
   const confs = [rec.warrant_1_confidence, rec.warrant_2_confidence, rec.warrant_4_confidence];
   if (confs.some(c => c >= BORDERLINE_LOW && c < BORDERLINE_HIGH)) return 'borderline';
   return 'not_warranted';

@@ -40,10 +40,17 @@ const ACTION_ICONS: Record<ActionKind, typeof CheckCircle2> = {
 };
 
 const TONE_CLASS: Record<ActionTone, string> = {
-  good:  'border-emerald-500/40 bg-emerald-50/80 text-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-100',
-  warn:  'border-amber-500/40 bg-amber-50/80 text-amber-900 dark:bg-amber-950/40 dark:text-amber-100',
-  info:  'border-sky-500/40 bg-sky-50/80 text-sky-900 dark:bg-sky-950/40 dark:text-sky-100',
-  muted: 'border-border bg-muted/40 text-muted-foreground',
+  good:  'border-emerald-200 dark:border-emerald-800 bg-card text-foreground shadow-sm',
+  warn:  'border-amber-200 dark:border-amber-800 bg-card text-foreground shadow-sm',
+  info:  'border-sky-200 dark:border-sky-800 bg-card text-foreground shadow-sm',
+  muted: 'border-border bg-card text-foreground shadow-sm',
+};
+
+const ICON_CLASS: Record<ActionTone, string> = {
+  good:  'bg-emerald-50 text-emerald-600 dark:bg-emerald-950/50 dark:text-emerald-400',
+  warn:  'bg-amber-50 text-amber-600 dark:bg-amber-950/50 dark:text-amber-400',
+  info:  'bg-sky-50 text-sky-600 dark:bg-sky-950/50 dark:text-sky-400',
+  muted: 'bg-muted text-muted-foreground',
 };
 
 interface Props {
@@ -102,6 +109,7 @@ export function IntersectionVerdictBanner({
   );
   const Icon = ACTION_ICONS[action.kind];
   const tone = TONE_CLASS[action.tone];
+  const iconCls = ICON_CLASS[action.tone];
 
   const warrants = useMemo(
     () => (rec ? summarizeWarrants(rec) : null),
@@ -112,17 +120,26 @@ export function IntersectionVerdictBanner({
   // by middots. Each piece is independently optional so the line degrades
   // gracefully when, say, no sim has run yet.
   const evidenceBits: string[] = [];
-  if (warrants && warrants.metCount > 0) {
-    const conf = warrants.topConfPct;
-    evidenceBits.push(
-      `${warrants.metLabels.join('+')} met${conf != null ? ` (${conf}%)` : ''}`,
-    );
-  } else if (warrants && warrants.metCount === 0) {
-    evidenceBits.push('no warrants met');
+  // Warrants are only relevant for signalize/monitor decisions. For a timing
+  // adjustment on an existing signal, "no warrants met" is expected and adds noise.
+  if (action.kind !== 'adjust_timing') {
+    if (warrants && warrants.metCount > 0) {
+      const conf = warrants.topConfPct;
+      evidenceBits.push(
+        `${warrants.metLabels.join('+')} met${conf != null ? ` (${conf}%)` : ''}`,
+      );
+    } else if (warrants && warrants.metCount === 0) {
+      evidenceBits.push('no warrants met');
+    }
   }
   if (rec?.timing_cycle != null) {
     const vh = rec.webster_vh_saved_per_day;
-    if (vh != null && vh > 1) {
+    if (action.kind === 'adjust_timing') {
+      // Cycle is already in the headline - just show the savings number
+      if (vh != null && vh > 1) {
+        evidenceBits.push(`+${Math.round(vh).toLocaleString()} vh/day`);
+      }
+    } else if (vh != null && vh > 1) {
       evidenceBits.push(`${rec.timing_cycle}s cycle saves ${Math.round(vh).toLocaleString()} vh/day`);
     } else {
       evidenceBits.push(`${rec.timing_cycle}s cycle`);
@@ -139,13 +156,13 @@ export function IntersectionVerdictBanner({
           type="button"
           className={cn(
             'group flex items-center gap-3 rounded-xl border px-3 py-2.5 print:hidden w-full text-left transition-all',
-            'hover:brightness-[1.02] focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-foreground/30',
+            'hover:shadow focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-foreground/30',
             tone,
           )}
           data-testid="verdict-banner"
           title="Click for full reasoning chain"
         >
-          <div className="rounded-lg bg-white/60 dark:bg-black/30 p-2 shrink-0">
+          <div className={cn('rounded-md p-2 shrink-0', iconCls)}>
             {busy
               ? <Loader2 className="size-5 animate-spin" />
               : <Icon className="size-5" />}
@@ -154,10 +171,10 @@ export function IntersectionVerdictBanner({
             <div className="flex items-baseline gap-2 flex-wrap">
               <p className="text-sm font-semibold leading-tight">{action.headline}</p>
               {evidenceBits.length > 0 && (
-                <p className="text-xs opacity-80 leading-snug">
+                <p className="text-xs text-muted-foreground leading-snug">
                   {evidenceBits.map((b, i) => (
                     <span key={i}>
-                      {i > 0 && <span className="opacity-50"> · </span>}
+                      {i > 0 && <span className="text-muted-foreground/50"> · </span>}
                       {b}
                     </span>
                   ))}
@@ -165,12 +182,12 @@ export function IntersectionVerdictBanner({
               )}
             </div>
             {action.detail && (
-              <p className="mt-0.5 text-[11px] opacity-70 leading-snug line-clamp-1">
+              <p className="mt-0.5 text-[11px] text-muted-foreground leading-snug line-clamp-1">
                 {action.detail}
               </p>
             )}
           </div>
-          <span className="inline-flex items-center gap-1 shrink-0 text-[11px] font-medium opacity-70 group-hover:opacity-100 transition-opacity">
+          <span className="inline-flex items-center gap-1 shrink-0 text-[11px] font-medium text-muted-foreground group-hover:text-foreground transition-colors">
             Why
             <ChevronDown className="size-3 transition-transform group-data-[state=open]:rotate-180" />
           </span>

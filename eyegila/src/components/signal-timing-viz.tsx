@@ -33,23 +33,28 @@ export function GanttBar({ label, greenSec, cycleLength }: { label: string; gree
       <span className="text-[11px] text-muted-foreground w-24 shrink-0 truncate" title={label}>{label}</span>
       <div className="flex flex-1 rounded overflow-hidden h-5">
         <div
-          style={{ width: `${greenPct}%` }}
-          className="bg-emerald-500 flex items-center justify-center text-[10px] text-white font-medium"
+          style={{ width: `${greenPct}%`, backgroundColor: '#10b981', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
           title={`Green: ${greenSec.toFixed(0)}s`}
         >
-          {greenPct > 10 ? `${greenSec.toFixed(0)}s` : ''}
+          {greenPct > 7 && (
+            <span style={{ color: 'white', fontSize: 11, fontWeight: 600, lineHeight: 1 }}>
+              {greenSec.toFixed(0)}s
+            </span>
+          )}
         </div>
         <div
-          style={{ width: `${yellowPct}%` }}
-          className="bg-amber-400"
+          style={{ width: `${yellowPct}%`, backgroundColor: '#fbbf24' }}
           title={`Yellow: ${YELLOW_S}s`}
         />
         <div
-          style={{ width: `${redPct}%` }}
-          className="bg-rose-400/40 flex items-center justify-center text-[10px] text-rose-700 dark:text-rose-300"
+          style={{ width: `${redPct}%`, backgroundColor: 'rgba(251,113,133,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
           title={`Red: ${redSec.toFixed(0)}s`}
         >
-          {redPct > 15 ? `${redSec.toFixed(0)}s` : ''}
+          {redPct > 12 && (
+            <span style={{ color: '#9f1239', fontSize: 11, fontWeight: 500, lineHeight: 1 }}>
+              {redSec.toFixed(0)}s
+            </span>
+          )}
         </div>
       </div>
     </div>

@@ -204,17 +204,29 @@ export function deriveIntersectionAction(
     }
     const conf = rec.intervention?.confidence ?? rec.recommended_confidence ?? 0;
     const confPct = Math.round(conf * 100);
-    // Frame the Webster number as operational *cost*, not delay impact. MUTCD
-    // warrants gate the install on safety/access grounds; Webster's role here
-    // is just to confirm that paying the operational price is acceptable.
-    // Positive vh_saved = bonus (signal both safer AND faster); near-zero
-    // = ideal (safety win at no operational cost); we already excluded the
-    // clearly-hurts case above (demoted to Monitor).
-    const websterDetail = websterRules
-      ? (vhSaved as number) > 0
-        ? `Webster projects ${(vhSaved as number).toFixed(1)} vh/day of delay reduction on top of the safety benefit.`
-        : `Webster projects negligible operational cost (about ${Math.abs(vhSaved as number).toFixed(0)} vh/day, within engineering noise).`
-      : 'Intersection is unsignalized.';
+    // Distinguish three Webster outcomes for an MUTCD-warranted signal:
+    //   > 0 vh:       signal is both safer and faster - clear win
+    //   > -15 vh:     truly negligible - engineering noise at this scale
+    //   -15 to -100:  signal adds meaningful delay - honest about the cost,
+    //                 but still recommend on safety/access grounds (flag contradiction)
+    const vhNum = vhSaved as number;
+    const addsDelay = websterRules && vhNum < -15;
+    // W4 is a pedestrian safety warrant - its purpose is protected crossing time,
+    // not vehicular throughput. When W4 is the sole trigger and the signal adds
+    // vehicular delay, that delay is the expected cost of prioritising pedestrians.
+    const pedestrianOnly =
+      rec.warrant_4_met &&
+      !rec.warrant_1_met && !rec.warrant_2_met &&
+      !rec.w_local_1_met && !rec.w_local_2_met && !rec.w_local_3_met;
+    const websterDetail = !websterRules
+      ? 'Intersection is unsignalized.'
+      : vhNum > 0
+        ? `Webster projects ${vhNum.toFixed(1)} vh/day of delay reduction on top of the safety benefit.`
+        : addsDelay
+          ? pedestrianOnly
+            ? `W4 is a pedestrian safety warrant - protected crossing time is the goal, not vehicular throughput. The signal will add ~${Math.abs(vhNum).toFixed(0)} vh/day of vehicular delay; that is the expected cost of prioritising pedestrians at this crossing.`
+            : `Installing the signal will add ~${Math.abs(vhNum).toFixed(0)} vh/day of vehicular delay. Still recommended on safety/access grounds - warrants assess crossing safety, not delay minimisation.`
+          : `Webster projects negligible operational cost (under 15 vh/day).`;
     return {
       kind: 'install_signal',
       headline: 'Install traffic signal',
@@ -222,7 +234,7 @@ export function deriveIntersectionAction(
       tone: 'good',
       lane: 'escalate',
       isTiming: false,
-      contradictionFlagged: false,
+      contradictionFlagged: addsDelay,
     };
   }
 
@@ -247,10 +259,10 @@ export function deriveIntersectionAction(
     }
     return {
       kind: 'adjust_timing',
-      headline: `Adjust timing to ${rec.timing_cycle}s cycle`,
+      headline: `Retime to ${rec.timing_cycle}s cycle`,
       detail: websterRules
-        ? `Existing signal stays - recomputed green time per approach saves ${(vhSaved as number).toFixed(1)} vh-hr/day.`
-        : 'Existing signal stays - recompute green time per approach to match current demand.',
+        ? `Rebalance green splits to save ${Math.round(vhSaved as number)} vh/day.`
+        : 'Rebalance green time per approach to match demand.',
       tone: 'info',
       lane: 'deploy',
       isTiming: true,

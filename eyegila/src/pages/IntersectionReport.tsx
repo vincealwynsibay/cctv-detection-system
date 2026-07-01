@@ -13,6 +13,7 @@ import { ARM_SHORT, GanttDiagram, LosBadge } from '@/components/signal-timing-vi
 import {
   statusBucket, BUCKET_LABEL,
 } from '@/components/recommendations/statusBucket';
+import { deriveIntersectionAction } from '@/lib/intersectionAction';
 import { cn } from '@/lib/utils';
 
 function fmt(n: number | null | undefined, unit = 's'): string {
@@ -42,30 +43,16 @@ function fmt(n: number | null | undefined, unit = 's'): string {
  * markup. The selectors deliberately target the wrapping class so global
  * print rules elsewhere in the app aren't disturbed.
  */
-/* Bundled body font for the printed report.
- *
- * Browser default web fonts (Georgia, Times) look generic and dated when
- * the operator hits Print, which was the complaint about the first version.
- * We pull Source Serif 4 (humanist serif designed by Adobe, MIT-licensed)
- * and IBM Plex Sans (the de-facto modern report sans) from Google Fonts via
- * @import so the page loads them once on render. If the print preview is
- * offline the system stack (Charter / Iowan Old Style / Cambria / Palatino)
- * still gives a credible serif fallback - none of those are Times.
- *
- * The fonts are scoped to the @media print block so we don't shift the
- * web view's typography.
- */
-const FONT_BODY = `"Source Serif 4", "Source Serif Pro", Charter, "Iowan Old Style", Cambria, Constantia, "Palatino Linotype", Palatino, Georgia, serif`;
-const FONT_HEAD = `"IBM Plex Sans", "Inter", "Helvetica Neue", Arial, sans-serif`;
-const FONT_MONO = `"IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace`;
+const FONT_BODY = `Arial, "Helvetica Neue", Helvetica, sans-serif`;
+const FONT_HEAD = `Arial, "Helvetica Neue", Helvetica, sans-serif`;
+const FONT_MONO = `"Courier New", Courier, monospace`;
 
 const PRINT_STYLES = `
-@import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
 
 @media print {
   @page {
     size: A4;
-    margin: 18mm 16mm 22mm 16mm;
+    margin: 12mm 14mm 16mm 14mm;
 
     @bottom-left {
       content: "Intersection Traffic Analysis Report";
@@ -86,40 +73,39 @@ const PRINT_STYLES = `
   /* Reset web chrome inside the print scope. */
   .print-report {
     font-family: ${FONT_BODY} !important;
-    font-size: 10.5pt;
-    line-height: 1.5;
+    font-size: 9pt;
+    line-height: 1.4;
     color: #111 !important;
     background: white !important;
     counter-reset: section;
-    /* OpenType niceties - ligatures and proportional oldstyle figures
-       for body prose, tabular figures only where we explicitly opt in. */
     font-feature-settings: "liga", "kern", "onum", "pnum";
   }
 
   .print-report * {
     color-adjust: exact;
     -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
   }
 
   /* Cover / title block. */
   .print-cover {
     display: block !important;
     border-bottom: 1.5pt solid #111;
-    padding-bottom: 12pt;
-    margin-bottom: 16pt;
+    padding-bottom: 7pt;
+    margin-bottom: 8pt;
   }
   .print-cover .doc-kind {
     font-family: ${FONT_HEAD};
-    font-size: 8.5pt;
+    font-size: 7.5pt;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.22em;
     color: #4b5563;
-    margin: 0 0 6pt 0;
+    margin: 0 0 3pt 0;
   }
   .print-cover h1 {
     font-family: ${FONT_BODY};
-    font-size: 24pt;
+    font-size: 18pt;
     font-weight: 700;
     margin: 0;
     line-height: 1.05;
@@ -127,10 +113,10 @@ const PRINT_STYLES = `
   }
   .print-cover .meta {
     font-family: ${FONT_HEAD};
-    font-size: 9pt;
+    font-size: 8pt;
     color: #374151;
-    margin-top: 10pt;
-    line-height: 1.5;
+    margin-top: 5pt;
+    line-height: 1.4;
   }
   .print-cover .meta-row {
     display: flex;
@@ -152,17 +138,17 @@ const PRINT_STYLES = `
     counter-increment: section;
     break-inside: avoid;
     page-break-inside: avoid;
-    margin-top: 14pt;
+    margin-top: 8pt;
   }
   .print-section > h2 {
     font-family: ${FONT_HEAD};
-    font-size: 10.5pt;
+    font-size: 8.5pt;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.1em;
     color: #111;
-    margin: 0 0 8pt 0;
-    padding-bottom: 4pt;
+    margin: 0 0 5pt 0;
+    padding-bottom: 3pt;
     border-bottom: 0.5pt solid #9ca3af;
   }
   .print-section > h2::before {
@@ -197,13 +183,13 @@ const PRINT_STYLES = `
   .print-report li,
   .print-report dd {
     font-family: ${FONT_BODY};
-    font-size: 10.5pt;
-    line-height: 1.55;
-    margin: 0 0 6pt 0;
+    font-size: 9pt;
+    line-height: 1.45;
+    margin: 0 0 4pt 0;
   }
   .print-report dt {
     font-family: ${FONT_HEAD};
-    font-size: 9pt;
+    font-size: 8pt;
     font-weight: 600;
     color: #374151;
   }
@@ -213,13 +199,13 @@ const PRINT_STYLES = `
     width: 100%;
     border-collapse: collapse;
     font-family: ${FONT_HEAD};
-    font-size: 9.5pt;
-    margin: 6pt 0 2pt 0;
+    font-size: 8.5pt;
+    margin: 4pt 0 2pt 0;
   }
   .print-table th,
   .print-table td {
     text-align: left;
-    padding: 5pt 8pt;
+    padding: 3pt 6pt;
     border-bottom: 0.5pt solid #d1d5db;
     vertical-align: top;
   }
@@ -227,7 +213,7 @@ const PRINT_STYLES = `
     border-bottom: 1pt solid #111;
     font-weight: 600;
     text-transform: uppercase;
-    font-size: 8pt;
+    font-size: 7.5pt;
     letter-spacing: 0.06em;
     color: #4b5563;
   }
@@ -236,7 +222,7 @@ const PRINT_STYLES = `
     text-align: right;
     font-family: ${FONT_MONO};
     font-variant-numeric: tabular-nums;
-    font-size: 9.5pt;
+    font-size: 8.5pt;
   }
 
   /* Force vertical flow inside report grids so columns don't squash on A4. */
@@ -325,6 +311,7 @@ export function IntersectionReportPage() {
     : (timing[0] ?? null);
   const bucket = rec ? statusBucket(rec) : null;
   const ds = sim?.daily_summary ?? null;
+  const action = deriveIntersectionAction(rec, intersection, { sim });
   const usableStreets = streets.filter(s => s.arm_direction !== 'unknown');
 
   const currentApproaches = usableStreets.map(s => ({
@@ -483,50 +470,6 @@ export function IntersectionReportPage() {
         </div>
       </section>
 
-      {/* Section 5: Methodology - print-only boilerplate so the document
-          stands on its own when read offline. */}
-      <section className="hidden print:block print-section">
-        <h2>Methodology</h2>
-        <p>
-          Vehicle counts were collected from CCTV detections classified by a
-          convolutional neural network. The MUTCD warrant analysis (W1
-          eight-hour volume, W2 four-hour volume, W4 pedestrian) was applied
-          to the resulting hourly volumes to determine whether the
-          intersection meets the conditions for signalisation.
-        </p>
-        <p>
-          Signal timing optimisation followed Webster's 1958 formula: the
-          cycle length minimises total intersection delay across the demand
-          observed at each approach, and per-approach green time is allocated
-          in proportion to the demand-to-capacity ratio. Average delay per
-          vehicle (s/veh) and Level of Service (LOS) are reported per the
-          Highway Capacity Manual, 6th Edition.
-        </p>
-        <p>
-          A 100-replay Monte Carlo simulation was run against the proposed
-          timing using stochastic arrival processes seeded by the observed
-          arrival rates. The 95% confidence interval reported above
-          represents the t-interval over the per-replay vehicle-hours saved.
-        </p>
-      </section>
-
-      {/* Section 6: Limitations / data caveats. */}
-      <section className="hidden print:block print-section">
-        <h2>Limitations</h2>
-        <p>
-          Detections are sampled from CCTV feeds covering the inbound
-          approaches only; turn movements are not separated. Saturation flow
-          uses the Highway Capacity Manual default of 1,900 PCU/hr/lane
-          adjusted for the configured passenger-car-equivalent mix.
-        </p>
-        <p>
-          For unsignalized intersections lacking a recorded existing cycle
-          length, the "before" condition uses a gap-acceptance model
-          (HCM 6th Ed. TWSC). Webster's projected savings should be treated
-          as an order-of-magnitude estimate until the recommended timing is
-          deployed and re-measured.
-        </p>
-      </section>
     </div>
   );
 }

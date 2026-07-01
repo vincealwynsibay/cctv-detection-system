@@ -276,9 +276,7 @@ export function IntersectionShell() {
         </div>
       </div>
 
-      {/* Single verdict banner - the reconciled action sits above every tab so
-          no individual tab needs to re-render it. The "Why" popover expands the
-          full detections -> CNN -> warrant -> Webster -> sim reasoning chain. */}
+      {/* Verdict banner - single source of truth shown on every tab */}
       <IntersectionVerdictBanner
         intersection={intersection}
         rec={rec}

@@ -127,6 +127,40 @@ function ChunkQueueChart({ chunk }: { chunk: SimulationChunk }) {
 
 
 
+const LOS_SQUARE_COLORS: Record<string, string> = {
+  A: '#10b981', // emerald-500
+  B: '#22c55e', // green-500
+  C: '#65a30d', // lime-600
+  D: '#f59e0b', // amber-500
+  E: '#f97316', // orange-500
+  F: '#ef4444', // red-500
+};
+
+/** 18x18 square badge with LOS grade, per T5 spec. */
+function InlineLosSquare({ grade }: { grade: string }) {
+  const bg = LOS_SQUARE_COLORS[grade] ?? '#94a3b8';
+  return (
+    <span
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        width: 18,
+        height: 18,
+        borderRadius: 5,
+        backgroundColor: bg,
+        color: '#fff',
+        fontSize: 10,
+        fontWeight: 700,
+        flexShrink: 0,
+        lineHeight: 1,
+      }}
+    >
+      {grade}
+    </span>
+  );
+}
+
 export function SignalTimingPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -381,17 +415,6 @@ export function SignalTimingPage() {
 
       {displayData && !loading && (
         <>
-          {/* Before-state source banner. In replay mode the Replaying strip
-              above already names the window in plain language; the
-              baseline_note ("Real-data window · ... · 1178 PCU/hr ...") then
-              duplicates that information in a second green box right under
-              the first. Suppress it in replay mode and keep it for the
-              default sim (where it conveys data freshness). */}
-          {!histMode && displayData.baseline_note && (
-            <div className="rounded-lg border border-amber-200 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-900 text-amber-800 dark:text-amber-300 px-4 py-2.5 text-xs">
-              {displayData.baseline_note}
-            </div>
-          )}
 
           {/* Warning: signalized but no existing timing entered - before-state is fictional.
               Routes the operator to the Settings cog in the shell, which now
@@ -425,135 +448,251 @@ export function SignalTimingPage() {
             </div>
           )}
 
-          {/* Findings panel - the reconciled recommendation (single source of
-              truth shared with the Dashboard and Live tab) plus Webster's
-              raw delay numbers, side by side, so engineers can audit both. */}
+          {/* Unified timing + evidence card */}
           {(() => {
-            const totalVhSaved = displayData.daily_summary.total_vehicle_hours_saved;
-            const peakVhChunk = displayData.chunks.length > 0
+            // Hero variables
+            const totalVhSaved   = displayData.daily_summary.total_vehicle_hours_saved;
+            const peakVhChunk    = displayData.chunks.length > 0
               ? [...displayData.chunks].sort((a, b) => b.vehicle_hours_saved - a.vehicle_hours_saved)[0]
               : null;
-            const peakVhSaved = peakVhChunk?.vehicle_hours_saved ?? 0;
-            const websterPositive = peakVhSaved > 0;
-            const action = deriveIntersectionAction(rec, intersection, { sim: displayData });
-            // Near-break-even guard: when the reconciled banner says "install
-            // signal" with the engineering-noise footnote, the raw Webster tile
-            // should match that framing instead of loudly contradicting it with
-            // a red "signal adds delay" headline. Same number, honest framing.
-            const negligibleDelay =
-              action.kind === 'install_signal' &&
-              Math.abs(totalVhSaved) < MONITOR_THRESHOLD_VH;
-            // Tone for the headline mirrors the dashboard banner colour family.
-            const headlineClass = action.tone === 'good'
-              ? 'text-emerald-700 dark:text-emerald-400'
-              : action.tone === 'warn'
-              ? 'text-amber-700 dark:text-amber-400'
-              : action.tone === 'info'
-              ? 'text-sky-700 dark:text-sky-400'
-              : 'text-muted-foreground';
-            return (
-              <div className="rounded-xl border border-border bg-card p-5 flex flex-col gap-3 print:hidden">
-                <p className="text-[11px] uppercase tracking-widest font-medium text-muted-foreground">
-                  Findings
-                </p>
+            const websterPositive = (peakVhChunk?.vehicle_hours_saved ?? 0) > 0;
+            const action          = deriveIntersectionAction(rec, intersection, { sim: displayData });
+            const negligibleDelay = action.kind === 'install_signal' && Math.abs(totalVhSaved) < MONITOR_THRESHOLD_VH;
+            const vhDisplay = websterPositive
+              ? `+${totalVhSaved.toFixed(1)} vh/day`
+              : negligibleDelay ? 'Negligible'
+              : totalVhSaved < 0 ? `${totalVhSaved.toFixed(1)} vh/day`
+              : 'No net reduction';
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  {/* Reconciled recommendation - matches Dashboard and Live tab */}
-                  <div className="flex flex-col gap-1">
-                    <p className="text-[10px] uppercase tracking-wide text-muted-foreground inline-flex items-center gap-1">
-                      Recommended action
-                      <JargonTip term="mutcd" />
-                    </p>
-                    <p className={cn('text-xl font-bold leading-tight', headlineClass)}>
-                      {action.headline}
-                    </p>
-                    <p className="text-xs text-muted-foreground">{action.detail}</p>
+            // Evidence variables (from shell - always the latest recommendation)
+            const sRec   = shellCtx.rec;
+            const sSim   = shellCtx.sim;
+            const sCams  = shellCtx.cameras;
+            const sSse   = shellCtx.sseData;
+            const sInter = shellCtx.intersection;
+            if (!sRec || !sInter) return null;
+
+            const sAction    = deriveIntersectionAction(sRec, sInter, { sim: sSim });
+            const ds         = sSim?.daily_summary;
+            const liveCount  = sSse
+              ? sSse.filter(r => r.intersection_id === intersectionId).reduce((t, r) => t + r.count, 0)
+              : null;
+            const vcCrit = sSim?.chunks?.length
+              ? sSim.chunks.reduce((mx, c) => (c.vc_ratio_before ?? 0) > (mx ?? 0) ? (c.vc_ratio_before ?? 0) : mx, null as number | null)
+              : (ds?.vc_ratio_before ?? null);
+            const confLabel = sRec.recommended_confidence != null
+              ? sRec.recommended_confidence >= 0.75 ? 'High' : sRec.recommended_confidence >= 0.4 ? 'Medium' : 'Low'
+              : 'High';
+            const confLevel = sRec.recommended_confidence != null
+              ? sRec.recommended_confidence >= 0.75 ? 'high' : sRec.recommended_confidence >= 0.4 ? 'medium' : 'low'
+              : 'high';
+            const wmLabels: string[] = [];
+            if (sRec.warrant_1_met) wmLabels.push('W1');
+            if (sRec.warrant_2_met) wmLabels.push('W2');
+            if (sRec.warrant_4_met) wmLabels.push('W4');
+            const topConf = Math.max(
+              sRec.warrant_1_confidence ?? 0,
+              sRec.warrant_2_confidence ?? 0,
+              sRec.warrant_4_confidence ?? 0,
+            );
+
+            return (
+              <div className="rounded-xl border border-border overflow-hidden print:hidden">
+                {/* Top: hero band - white bg, dark green text */}
+                <div className="bg-card">
+                  <div className="grid" style={{ gridTemplateColumns: '1.2fr 1fr' }}>
+                    <div className="px-6 py-5 flex flex-col gap-3">
+                      <p className="text-[12px] font-semibold text-emerald-700 dark:text-emerald-400 uppercase tracking-wide">
+                        Signal timing plan
+                      </p>
+                      <div className="flex items-baseline gap-2">
+                        <span className="font-black tabular-nums leading-none text-emerald-900 dark:text-emerald-200"
+                          style={{ fontSize: 38, fontFamily: "'Space Grotesk', sans-serif" }}>
+                          {rec.timing_cycle}
+                        </span>
+                        <span className="text-[15px] font-semibold text-emerald-700 dark:text-emerald-400">s optimal cycle</span>
+                      </div>
+                      <p className="text-[13px] text-emerald-700/80 dark:text-emerald-400/80 leading-relaxed -mt-1">
+                        {rec.major_volume != null && rec.minor_volume != null
+                          ? `${rec.major_volume.toLocaleString()} major · ${rec.minor_volume.toLocaleString()} minor vehicles/hr`
+                          : action.detail}
+                      </p>
+                      <div className="flex items-center gap-2 mt-1">
+                        <button type="button" onClick={() => window.print()}
+                          className="px-4 py-1.5 rounded-full bg-emerald-700 text-white text-sm font-semibold hover:bg-emerald-800 transition-colors">
+                          Export plan &rarr;
+                        </button>
+                      </div>
+                    </div>
+                    <div className="px-6 py-5 flex flex-col gap-2 border-l border-emerald-100 dark:border-emerald-900">
+                      <p className="text-[12px] font-semibold text-emerald-700 dark:text-emerald-400 uppercase tracking-wide inline-flex items-center gap-1">
+                        Delay impact (Webster) <JargonTip term="websters" />
+                      </p>
+                      <p className={cn('font-black tabular-nums leading-none',
+                        websterPositive ? 'text-emerald-700 dark:text-emerald-400' : negligibleDelay ? 'text-emerald-900/50 dark:text-emerald-300/50' : 'text-emerald-900 dark:text-emerald-200')}
+                        style={{ fontSize: '38px', fontFamily: "'Space Grotesk', sans-serif" }}>
+                        {vhDisplay}
+                      </p>
+                      <p className="text-[12px] text-emerald-700/80 dark:text-emerald-400/80 inline-flex items-center gap-1">
+                        Vehicle-hours saved daily <JargonTip term="vh_saved" />
+                      </p>
+                      {totalVhSaved > 0 && (
+                        <div className="mt-1">
+                          <ConfidenceBadge intersectionId={intersectionId} variant="inline"
+                            window={shellWindow ? { start: shellWindow.start, end: shellWindow.end } : null} />
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  {action.contradictionFlagged && (
+                    <div className="mx-6 mb-5 rounded-lg border border-sky-200 bg-sky-50 dark:border-sky-800 dark:bg-sky-950/30 px-4 py-3">
+                      <p className="text-sm font-semibold text-sky-900 dark:text-sky-200 mb-1">
+                        {sRec.warrant_4_met && !sRec.warrant_1_met && !sRec.warrant_2_met
+                          ? 'Safety warrant - vehicular delay is expected'
+                          : 'Warrant and delay models measure different things'}
+                      </p>
+                      <p className="text-sm text-sky-800 dark:text-sky-300 leading-relaxed">
+                        {sRec.warrant_4_met && !sRec.warrant_1_met && !sRec.warrant_2_met
+                          ? 'W4 is a pedestrian safety warrant. MUTCD checks whether crossing volumes justify protected time for pedestrians; vehicular delay is not part of that test. Webster shows the vehicular cost of adding a signal; that cost is expected and acceptable when pedestrian safety is the goal. The Monte Carlo confidence reflects delay savings, which are not the objective here.'
+                          : 'MUTCD warrants check a single peak hour against count thresholds; Webster\'s integrates delay across the whole day. When the warrant trips on a brief peak but most of the day is free-flow, adding a signal imposes idle red-time delay on otherwise empty approaches. Both models are correct; they measure different things.'}
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                {/* Middle: 4-stat row */}
+                <div className="flex border-t border-border bg-card">
+                  <div className="flex-1 px-6 py-4">
+                    <div className="text-[11px] font-semibold text-muted-foreground">
+                      Detection confidence <JargonTip term="confidence" />
+                    </div>
+                    <div className="flex items-center gap-2 mt-2">
+                      <span className="text-[20px] font-bold text-foreground tabular-nums"
+                        style={{ fontFamily: "'Space Grotesk', sans-serif" }}>{confLabel}</span>
+                      <span className="inline-flex gap-0.5">
+                        {[0,1,2,3].map(i => (
+                          <span key={i} className={cn('w-1.5 h-4 rounded-sm',
+                            i < (confLevel === 'high' ? 4 : confLevel === 'medium' ? 2 : 1) ? 'bg-emerald-500' : 'bg-border'
+                          )} />
+                        ))}
+                      </span>
+                    </div>
+                    <div className="text-[10.5px] text-muted-foreground mt-1">CNN warrant detection</div>
                   </div>
 
-                  {/* Webster's operational-cost / delay-impact panel. Label
-                      flips with the action: an install_signal verdict with
-                      near-zero vh_saved reads as "operational cost: negligible"
-                      so the panel tells the same story as the banner. A
-                      positive Webster number is always good news, regardless
-                      of which action verdict the helper picked. */}
-                  <div className="flex flex-col gap-1">
-                    <p className="text-[10px] uppercase tracking-wide text-muted-foreground inline-flex items-center gap-1">
-                      {negligibleDelay ? 'Operational cost (Webster)' : 'Delay impact (Webster)'}
-                      <JargonTip term="websters" />
-                    </p>
-                    <p className={cn(
-                      'text-xl font-bold leading-tight tabular-nums',
-                      websterPositive
-                        ? 'text-emerald-700 dark:text-emerald-400'
-                        : negligibleDelay
-                          ? 'text-muted-foreground'
-                          : 'text-foreground',
-                    )}>
-                      {websterPositive
-                        ? `+${peakVhSaved.toFixed(1)} vh/day at ${peakVhChunk?.chunk_name}`
-                        : negligibleDelay
-                          ? 'Negligible (within engineering noise)'
-                          : totalVhSaved < 0
-                            ? `${totalVhSaved.toFixed(1)} vh/day, signal adds delay`
-                            : 'No net delay reduction'}
-                    </p>
-                    <p className="text-xs text-muted-foreground inline-flex items-center gap-1">
-                      Daily total: <span className="font-medium tabular-nums">
-                        {totalVhSaved >= 0 ? '+' : ''}{totalVhSaved.toFixed(1)} vh/day
-                      </span>
-                      <JargonTip term="vh_saved" />
-                    </p>
+                  {ds?.los_before && ds?.los_after && (
+                    <div className="flex-1 px-6 py-4 border-l border-border">
+                      <div className="text-[11px] font-semibold text-muted-foreground">
+                        Level of service <JargonTip term="los" />
+                      </div>
+                      <div className="flex items-baseline gap-2 mt-2">
+                        <span className={cn('text-[20px] font-black',
+                          { A:'text-emerald-600',B:'text-green-600',C:'text-lime-700',D:'text-amber-600',E:'text-orange-600',F:'text-red-600' }[ds.los_before] ?? 'text-foreground'
+                        )} style={{ fontFamily: "'Space Grotesk', sans-serif" }}>{ds.los_before}</span>
+                        <span className="text-muted-foreground text-sm">&rarr;</span>
+                        <span className={cn('text-[20px] font-black',
+                          { A:'text-emerald-600',B:'text-green-600',C:'text-lime-700',D:'text-amber-600',E:'text-orange-600',F:'text-red-600' }[ds.los_after] ?? 'text-foreground'
+                        )} style={{ fontFamily: "'Space Grotesk', sans-serif" }}>{ds.los_after}</span>
+                      </div>
+                      <div className="text-[10.5px] text-muted-foreground mt-1">at the peak hour</div>
+                    </div>
+                  )}
+
+                  {(sRec.webster_vh_saved_per_day ?? 0) > 0 && (
+                    <div className="flex-1 px-6 py-4 border-l border-border">
+                      <div className="text-[11px] font-semibold text-muted-foreground">
+                        Delay saved <JargonTip term="vh_saved" />
+                      </div>
+                      <div className="flex items-baseline gap-1.5 mt-2">
+                        <span className="text-[20px] font-black text-emerald-600 tabular-nums"
+                          style={{ fontFamily: "'Space Grotesk', sans-serif" }}>
+                          +{Math.round(sRec.webster_vh_saved_per_day!)}
+                        </span>
+                        <span className="text-[11px] text-muted-foreground">vh / day</span>
+                      </div>
+                      <div className="text-[10.5px] text-muted-foreground mt-1">
+                        ~{Math.round((sRec.webster_vh_saved_per_day ?? 0) * 60).toLocaleString()} driver-minutes
+                      </div>
+                    </div>
+                  )}
+
+                  {vcCrit != null && (
+                    <div className="flex-1 px-6 py-4 border-l border-border">
+                      <div className="text-[11px] font-semibold text-muted-foreground">
+                        Critical v/c <JargonTip term="vc_ratio" />
+                      </div>
+                      <div className="mt-2">
+                        <span className={cn('text-[20px] font-black tabular-nums',
+                          vcCrit >= 1 ? 'text-red-600' : vcCrit >= 0.85 ? 'text-amber-600' : 'text-foreground'
+                        )} style={{ fontFamily: "'Space Grotesk', sans-serif" }}>
+                          {vcCrit.toFixed(2)}
+                        </span>
+                      </div>
+                      <div className="text-[10.5px] text-muted-foreground mt-1">
+                        {vcCrit >= 1 ? 'over capacity' : 'busiest approach'}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Monte Carlo confidence - stat column */}
+                  <div className="flex-1 px-6 py-4 border-l border-border">
+                    <div className="text-[11px] font-semibold text-muted-foreground">
+                      Simulation confidence
+                    </div>
+                    <div className="mt-2">
+                      <ConfidenceBadge
+                        intersectionId={intersectionId}
+                        variant="stat"
+                        window={shellWindow ? { start: shellWindow.start, end: shellWindow.end } : null}
+                      />
+                    </div>
+                    <div className="text-[10.5px] text-muted-foreground mt-1">100 Monte Carlo runs</div>
                   </div>
                 </div>
 
-                {/* Per-chunk breakdown */}
-                {displayData.chunks.length > 1 && (
-                  <div className="flex flex-wrap gap-1.5 pt-1 border-t border-border">
-                    <p className="basis-full text-[10px] uppercase tracking-wide text-muted-foreground mb-1 mt-2 inline-flex items-center gap-1">
-                      Per period <JargonTip term="tod_chunk" />
-                    </p>
-                    {displayData.chunks.map(c => (
-                      <span
-                        key={c.chunk_name}
-                        className={cn(
-                          'text-[11px] px-2 py-0.5 rounded border tabular-nums',
-                          c.vehicle_hours_saved > 0
-                            ? 'border-emerald-300 text-emerald-700 dark:border-emerald-800 dark:text-emerald-400'
-                            : 'border-border text-muted-foreground',
-                        )}
-                      >
-                        {c.chunk_name}: {c.vehicle_hours_saved >= 0 ? '+' : ''}
-                        {c.vehicle_hours_saved.toFixed(1)} vh
-                      </span>
+                {/* Bottom: detections-to-action rail */}
+                <div className="px-6 py-5 border-t border-border bg-card">
+                  <p className="text-[12px] font-semibold text-muted-foreground mb-4">
+                    The analysis · detections to action
+                  </p>
+                  <div className="flex items-start">
+                    {([
+                      { label: 'Detections',    value: liveCount != null ? liveCount.toLocaleString() : '-', sub: `today · ${sCams.length} CCTV${sCams.length !== 1 ? 's' : ''}`, filled: liveCount != null },
+                      { label: 'CNN model',     value: wmLabels.length > 0 ? wmLabels.join(' · ') : '-',    sub: topConf > 0 ? `up to ${Math.round(topConf * 100)}%` : 'no warrants met', filled: wmLabels.length > 0 },
+                      { label: 'MUTCD verdict', value: wmLabels.length > 0 ? 'Passed' : 'Not met',           sub: wmLabels.length > 0 ? wmLabels.join('+') : 'no warrant met', filled: wmLabels.length > 0 },
+                      { label: 'Webster',       value: sRec.timing_cycle ? `${sRec.timing_cycle}s` : '-',   sub: 'optimal cycle', filled: !!sRec.timing_cycle },
+                      { label: 'Replays',       value: sSim?.chunks?.length ? `${sSim.chunks.length * 20} runs` : '100 runs', sub: `LOS ${ds?.los_before ?? '?'}→${ds?.los_after ?? '?'} stable`, filled: true },
+                      { label: 'Action',        value: sAction.kind === 'install_signal' ? 'Signalize' : sAction.kind === 'adjust_timing' ? 'Retime' : sAction.kind === 'widen_lanes' ? 'Widen' : sAction.kind === 'monitor' ? 'Monitor' : 'Review', sub: 'reconciled', filled: true, isLast: true },
+                    ] as const).map((node, idx, arr) => (
+                      <div key={idx} className="flex-1 flex flex-col items-center text-center gap-2 min-w-0">
+                        <div className="flex items-center w-full">
+                          <div className={cn('flex-1 h-px', idx === 0 ? 'bg-transparent' : 'bg-border')} />
+                          <div className={cn('size-4 rounded-full border-2 shrink-0',
+                            node.isLast ? 'bg-emerald-500 border-emerald-500 ring-4 ring-emerald-500/20'
+                            : node.filled ? 'bg-emerald-500 border-emerald-500'
+                            : 'bg-card border-border'
+                          )} />
+                          <div className={cn('flex-1 h-px', idx === arr.length - 1 ? 'bg-transparent' : 'bg-border')} />
+                        </div>
+                        <div>
+                          <div className="text-[11px] font-semibold text-muted-foreground">{node.label}</div>
+                          <div className="text-[16px] font-bold text-foreground mt-1 tabular-nums leading-none"
+                            style={{ fontFamily: "'Space Grotesk', sans-serif" }}>{node.value}</div>
+                          <div className="text-[10px] text-muted-foreground mt-1">{node.sub}</div>
+                        </div>
+                      </div>
                     ))}
                   </div>
-                )}
+                </div>
 
-                {action.contradictionFlagged && (
-                  <p className="text-xs italic text-muted-foreground leading-relaxed border-t border-border pt-3">
-                    MUTCD warrants check a single peak hour against count thresholds; Webster's
-                    integrates delay across the whole day. When the warrant trips on a brief peak
-                    but most of the day is free-flow, adding a signal imposes idle red-time delay
-                    on empty approaches - Webster scores that as worse, not better. Both models
-                    are correct; the headline reflects the daily picture.
-                  </p>
-                )}
-
-                {/* Stochastic confidence (Monte Carlo) - lives inside the
-                    Findings card so action, deterministic projection, and
-                    100-replay verdict read as one block of evidence. Default
-                    mode aggregates across every TOD chunk into an "All day"
-                    envelope; replay mode runs MC against the picked window
-                    so the envelope matches windowed Webster's units. */}
-                {displayData.daily_summary.total_vehicle_hours_saved > 0 && (
-                  <div className="border-t border-border pt-3">
-                    <ConfidenceBadge
-                      intersectionId={intersectionId}
-                      variant="section"
-                      window={shellWindow ? { start: shellWindow.start, end: shellWindow.end } : null}
-                    />
-                  </div>
-                )}
+                {/* Monte Carlo simulation confidence - third section inside the box */}
+                <div className="px-6 py-5 border-t border-border bg-card">
+                  <ConfidenceBadge
+                    intersectionId={intersectionId}
+                    variant="section"
+                    window={shellWindow ? { start: shellWindow.start, end: shellWindow.end } : null}
+                  />
+                </div>
               </div>
             );
           })()}
@@ -570,7 +709,7 @@ export function SignalTimingPage() {
                 data-testid="btn-chunk-all"
                 onClick={() => selectChunk(null)}
                 className={cn(
-                  'px-3 py-1 text-xs rounded-md border transition-colors',
+                  'px-3.5 py-1 text-xs rounded-full border transition-colors font-medium',
                   selectedChunk === null
                     ? 'bg-primary text-primary-foreground border-primary'
                     : 'border-border text-muted-foreground hover:border-foreground hover:text-foreground',
@@ -584,7 +723,7 @@ export function SignalTimingPage() {
                   data-testid={`btn-chunk-${c.chunk_name.toLowerCase().replace(/\s+/g, '-')}`}
                   onClick={() => selectChunk(c.chunk_name)}
                   className={cn(
-                    'px-3 py-1 text-xs rounded-md border transition-colors',
+                    'px-3.5 py-1 text-xs rounded-full border transition-colors font-medium',
                     selectedChunk === c.chunk_name
                       ? 'bg-primary text-primary-foreground border-primary'
                       : 'border-border text-muted-foreground hover:border-foreground hover:text-foreground',
@@ -597,82 +736,68 @@ export function SignalTimingPage() {
             </div>
           )}
 
-          {/* Summary strip - shows selected chunk when one is active, daily totals for "All" */}
+          {/* Key metrics strip - 3 equal columns with hairline dividers */}
           {(() => {
             const delayBefore = displayChunk ? displayChunk.delay_before : displayData.daily_summary.avg_delay_before;
             const losBefore   = displayChunk ? displayChunk.los_before   : displayData.daily_summary.los_before;
             const delayAfter  = displayChunk ? displayChunk.delay_after  : displayData.daily_summary.avg_delay_after;
             const losAfter    = displayChunk ? displayChunk.los_after    : displayData.daily_summary.los_after;
             const vhSaved     = displayChunk ? displayChunk.vehicle_hours_saved : displayData.daily_summary.total_vehicle_hours_saved;
-            // "Total flow" (PCU/hr) card was cut here too — same reason as the
-            // IntersectionReport page: PCU is a jargon unit and the plain
-            // veh/hr Major/Minor figure in Findings covers the same ground.
             const vhLabel     = displayChunk ? 'vh saved this period' : (histMode ? 'vh for this window' : 'vh saved per day');
             return (
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <div className="rounded-lg border border-border bg-card p-4 print:p-3">
-                  <p className="text-xs text-muted-foreground inline-flex items-center gap-1">
-                    Avg delay before <JargonTip term="los" />
+              <div className="grid grid-cols-3 divide-x divide-border rounded-xl border border-border overflow-hidden bg-card print:grid-cols-3">
+                {/* Avg delay current */}
+                <div className="px-5 py-4 print:p-3">
+                  <p className="text-[11px] font-medium text-muted-foreground uppercase tracking-wide inline-flex items-center gap-1">
+                    Avg delay &middot; current <JargonTip term="los" />
                   </p>
-                  <p className="text-xl font-semibold mt-1">{fmt(delayBefore)}</p>
-                  <div className="flex items-center gap-1.5 mt-1">
-                    <p className="text-xs text-muted-foreground">per vehicle</p>
-                    <LosBadge grade={losBefore} />
+                  <div className="flex items-center gap-2 mt-2">
+                    <p className="text-[22px] font-bold tabular-nums leading-none">{fmt(delayBefore)}</p>
+                    <InlineLosSquare grade={losBefore} />
                   </div>
+                  <p className="text-[11px] text-muted-foreground mt-1">per vehicle</p>
                 </div>
-                <div className="rounded-lg border border-border bg-card p-4 print:p-3">
-                  <p className="text-xs text-muted-foreground inline-flex items-center gap-1">
-                    Avg delay after <JargonTip term="websters" />
+
+                {/* Avg delay proposed */}
+                <div className="px-5 py-4 print:p-3">
+                  <p className="text-[11px] font-medium text-muted-foreground uppercase tracking-wide inline-flex items-center gap-1">
+                    Avg delay &middot; proposed <JargonTip term="websters" />
                   </p>
-                  <p className="text-xl font-semibold mt-1 text-emerald-600">{fmt(delayAfter)}</p>
-                  <div className="flex items-center gap-1.5 mt-1">
-                    <p className="text-xs text-muted-foreground">per vehicle</p>
-                    <LosBadge grade={losAfter} />
+                  <div className="flex items-center gap-2 mt-2">
+                    <p className="text-[22px] font-bold tabular-nums leading-none text-emerald-600">{fmt(delayAfter)}</p>
+                    <InlineLosSquare grade={losAfter} />
                   </div>
+                  <p className="text-[11px] text-muted-foreground mt-1">per vehicle</p>
                 </div>
-                <div className="rounded-lg border border-border bg-card p-4 print:p-3">
-                  <p className="text-xs text-muted-foreground inline-flex items-center gap-1">
+
+                {/* Vehicle-hours saved */}
+                <div className="px-5 py-4 print:p-3">
+                  <p className="text-[11px] font-medium text-muted-foreground uppercase tracking-wide inline-flex items-center gap-1">
                     Vehicle-hours saved <JargonTip term="vh_saved" />
                   </p>
-                  <p className={cn('text-xl font-semibold mt-1', vhSaved > 0 && 'text-emerald-600')}>
-                    {vhSaved.toFixed(1)} vh
+                  <p
+                    className={cn('tabular-nums font-black leading-none mt-2', vhSaved > 0 ? 'text-emerald-600' : 'text-foreground')}
+                    style={{ fontSize: '28px', fontFamily: "'Space Grotesk', sans-serif" }}
+                  >
+                    {vhSaved > 0 ? '+' : ''}{vhSaved.toFixed(1)} vh
                   </p>
-                  <p className="text-xs text-muted-foreground mt-1">{vhLabel}</p>
+                  <p className="text-[11px] text-muted-foreground mt-1">{vhLabel}</p>
                 </div>
               </div>
             );
           })()}
 
-          {/* LOS legend */}
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground print:hidden">
-            <span className="font-medium text-foreground inline-flex items-center gap-1">
-              LOS grade: <JargonTip term="los" />
-            </span>
-            {([
-              ['A', '≤10s - free flow'],
-              ['B', '10–20s - stable'],
-              ['C', '20–35s - acceptable'],
-              ['D', '35–55s - approaching unstable'],
-              ['E', '55–80s - unstable'],
-              ['F', '>80s - forced/breakdown'],
-            ] as const).map(([g, desc]) => (
-              <span key={g} className="flex items-center gap-1">
-                <LosBadge grade={g} /><span>{desc}</span>
-              </span>
-            ))}
-          </div>
-
-          {/* Per-chunk table - click a row to select it for the chart / simulation */}
-          <div className="rounded-lg border border-border overflow-hidden print:hidden">
+          {/* Per-chunk table with T5 styling */}
+          <div className="rounded-xl border border-border overflow-hidden print:hidden">
             <Table>
               <TableHeader>
-                <TableRow>
-                  <TableHead>Period</TableHead>
-                  <TableHead className="text-right">Before delay</TableHead>
-                  <TableHead className="text-right">After delay</TableHead>
-                  <TableHead className="text-right">Improvement</TableHead>
-                  <TableHead className="text-right">v/c ratio</TableHead>
-                  <TableHead className="text-right">Veh-hrs saved</TableHead>
+                <TableRow style={{ background: 'oklch(0.965 0.006 145)' }}>
+                  <TableHead className="font-semibold text-foreground">Period</TableHead>
+                  <TableHead className="text-right font-semibold text-foreground">Before delay</TableHead>
+                  <TableHead className="text-right font-semibold text-foreground">After delay</TableHead>
+                  <TableHead className="text-right font-semibold text-foreground">Improvement</TableHead>
+                  <TableHead className="text-right font-semibold text-foreground">v/c ratio</TableHead>
+                  <TableHead className="text-right font-semibold text-foreground">Veh-hrs</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -687,21 +812,25 @@ export function SignalTimingPage() {
                     >
                       <TableCell className="font-medium">{chunk.chunk_name}</TableCell>
                       <TableCell className="text-right tabular-nums">
-                        <span className="mr-1.5">{fmt(chunk.delay_before)}</span>
-                        <LosBadge grade={chunk.los_before} />
+                        <span className="inline-flex items-center justify-end gap-1.5">
+                          {fmt(chunk.delay_before)}
+                          <InlineLosSquare grade={chunk.los_before} />
+                        </span>
                       </TableCell>
                       <TableCell className={cn('text-right tabular-nums', deltaClass(chunk.delay_before, chunk.delay_after))}>
-                        <span className="mr-1.5">{fmt(chunk.delay_after)}</span>
-                        <LosBadge grade={chunk.los_after} />
+                        <span className="inline-flex items-center justify-end gap-1.5">
+                          {fmt(chunk.delay_after)}
+                          <InlineLosSquare grade={chunk.los_after} />
+                        </span>
                       </TableCell>
                       <TableCell className={cn('text-right tabular-nums', improvement > 0 ? 'text-emerald-600' : 'text-muted-foreground')}>
-                        {improvement > 0 ? `−${improvement.toFixed(1)}s (${pct}%)` : '-'}
+                        {improvement > 0 ? `-${improvement.toFixed(1)}s (${pct}%)` : '-'}
                       </TableCell>
                       <TableCell className="text-right tabular-nums text-xs">
                         {fmtVc(chunk.vc_ratio_before)}
                         {chunk.vc_ratio_before != null && chunk.vc_ratio_after != null && (
                           <span className={cn('ml-1', chunk.vc_ratio_after < chunk.vc_ratio_before ? 'text-emerald-600' : 'text-rose-600')}>
-                            → {fmtVc(chunk.vc_ratio_after)}
+                            &rarr; {fmtVc(chunk.vc_ratio_after)}
                           </span>
                         )}
                       </TableCell>
@@ -711,15 +840,19 @@ export function SignalTimingPage() {
                     </TableRow>
                   );
                 })}
-                <TableRow className="bg-muted/30 font-semibold border-t-2 border-border">
-                  <TableCell>{histMode ? 'Window total' : 'Daily avg'}</TableCell>
+                <TableRow style={{ background: 'oklch(0.97 0.006 150)' }} className="font-semibold border-t-2 border-border">
+                  <TableCell>{histMode ? 'Window total' : 'Daily average'}</TableCell>
                   <TableCell className="text-right tabular-nums">
-                    <span className="mr-1.5">{fmt(displayData.daily_summary.avg_delay_before)}</span>
-                    <LosBadge grade={displayData.daily_summary.los_before} />
+                    <span className="inline-flex items-center justify-end gap-1.5">
+                      {fmt(displayData.daily_summary.avg_delay_before)}
+                      <InlineLosSquare grade={displayData.daily_summary.los_before} />
+                    </span>
                   </TableCell>
                   <TableCell className={cn('text-right tabular-nums', deltaClass(displayData.daily_summary.avg_delay_before, displayData.daily_summary.avg_delay_after))}>
-                    <span className="mr-1.5">{fmt(displayData.daily_summary.avg_delay_after)}</span>
-                    <LosBadge grade={displayData.daily_summary.los_after} />
+                    <span className="inline-flex items-center justify-end gap-1.5">
+                      {fmt(displayData.daily_summary.avg_delay_after)}
+                      <InlineLosSquare grade={displayData.daily_summary.los_after} />
+                    </span>
                   </TableCell>
                   <TableCell className="text-right text-muted-foreground">avg</TableCell>
                   <TableCell className="text-right text-muted-foreground">-</TableCell>
@@ -731,9 +864,29 @@ export function SignalTimingPage() {
             </Table>
           </div>
 
+          {/* LOS legend - after the table per T5 spec */}
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-muted-foreground print:hidden">
+            <span className="font-medium text-foreground inline-flex items-center gap-1">
+              LOS grade: <JargonTip term="los" />
+            </span>
+            {([
+              ['A', '10s - free flow'],
+              ['B', '10-20s - stable'],
+              ['C', '20-35s - acceptable'],
+              ['D', '35-55s - approaching unstable'],
+              ['E', '55-80s - unstable'],
+              ['F', '>80s - forced/breakdown'],
+            ] as const).map(([g, desc]) => (
+              <span key={g} className="flex items-center gap-1.5">
+                <InlineLosSquare grade={g} />
+                <span>{desc}</span>
+              </span>
+            ))}
+          </div>
+
           {/* Phase comparison - Current vs Recommended */}
           {activeTiming && streets.length > 0 && (
-            <div className="rounded-lg border border-border bg-card p-5 print:p-3 print:break-inside-avoid">
+            <div className="rounded-lg border border-border bg-card p-5 print:p-3 print:break-inside-avoid" style={{ WebkitPrintColorAdjust: 'exact' }}>
               <h2 className="text-sm font-semibold mb-4 print:mb-2">Phase comparison - {selectedChunk ? activeTiming.chunk_name : `All periods · using ${activeTiming.chunk_name} (peak)`}</h2>
               <div className="flex gap-6 flex-col sm:flex-row">
                 {intersection?.existing_cycle_length && intersection?.existing_green_splits ? (

@@ -211,11 +211,22 @@ function formatPeakHour(iso: string | null): string {
 
 // ── Warrant badge ────────────────────────────────────────────────────────────
 
-function WarrantBadge({ rec }: { rec: RecommendationResponse | undefined }) {
+function WarrantBadge({ rec, inter }: { rec: RecommendationResponse | undefined; inter: Intersection }) {
   if (!rec) {
     return (
       <Badge variant="outline" className="text-[10px] border-muted text-muted-foreground bg-muted/40">
         No analysis yet
+      </Badge>
+    );
+  }
+  // For signalized intersections the action is a timing adjustment - MUTCD
+  // warrants gate signal *installation*, so "Warranted / Not warranted" is
+  // the wrong label. Show "Timing update" instead.
+  const action = deriveIntersectionAction(rec, inter);
+  if (action.kind === 'adjust_timing') {
+    return (
+      <Badge variant="outline" className="text-[10px] border-sky-200 text-sky-700 bg-sky-50 dark:border-sky-800 dark:text-sky-400 dark:bg-sky-950/30">
+        Timing update
       </Badge>
     );
   }
@@ -282,7 +293,7 @@ function IntersectionCard({ inter, cameras, rec, streets, liveCount, dailyStats,
               <Badge variant="secondary" className="text-[9px] px-1.5 py-0">
                 {inter.signal_status.replace('_', ' ')}
               </Badge>
-              <WarrantBadge rec={rec} />
+              <WarrantBadge rec={rec} inter={inter} />
             </div>
           </div>
           <button
