@@ -1,0 +1,63 @@
+# Isolated chaos-demo stack. Runs under its own compose project (-p durable-sink)
+# and its own network, with NO host port publishing, so it cannot collide with
+# the real EyeGila stack that may already be running on 5432/5433/6379.
+#
+# Mirrors production images: timescaledb-pg16 + redis 7. Redis runs with AOF
+# (appendfsync everysec) so the buffered stream is durable on disk — the whole
+# point of the exercise.
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  db:
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: traffic
+    volumes:
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  sink:
+    build: .
+    command: ["python", "sink.py"]
+    environment:
+      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/traffic
+    restart: unless-stopped          # so it keeps retrying while the DB is down
+    depends_on:
+      redis:
+        condition: service_healthy
+    # NB: intentionally does NOT depend on db — the sink must run and reconnect
+    # on its own while the database is unavailable.
+
+  producer:
+    build: .
+    command: ["python", "producer.py", "--count", "4000", "--rate", "200", "--dup-prob", "0.05"]
+    environment:
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: "no"
+
+  verify:
+    build: .
+    command: ["python", "verify.py"]
+    environment:
+      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/traffic
+    profiles: [manual]               # only run explicitly, at the end
+    restart: "no"

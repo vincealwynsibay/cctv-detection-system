@@ -54,6 +54,12 @@ services:
     image: redis:7-alpine
     container_name: redis
     restart: unless-stopped
+    # AOF persistence so the durable enforcement-event buffer survives a Redis
+    # restart. everysec = at most ~1s of buffered events lost on a hard crash,
+    # negligible fsync cost. Data lands in the redis_data volume.
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redis_data:/data
     ports:
       - "6379:6379"
     healthcheck:
@@ -144,6 +150,27 @@ services:
       redis:
         condition: service_healthy
       pgbouncer:
+        condition: service_healthy
+
+  # Durable-buffer sink: drains the enforcement_events Redis Stream into
+  # TimescaleDB. Deliberately depends only on redis (NOT pgbouncer/db) so it
+  # keeps running and retrying while the database is down - that is the whole
+  # point of the buffer. See sink/sink.py and experiments/durable-sink/.
+  sink:
+    build:
+      context: .
+      dockerfile: rq-worker/Dockerfile
+    container_name: enforcement-sink
+    restart: unless-stopped
+    command: python -m sink.sink
+    environment:
+      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgresql://postgres:postgres@pgbouncer:5432/traffic
+    volumes:
+      - ./common:/app/common
+      - ./sink:/app/sink
+    depends_on:
+      redis:
         condition: service_healthy
 
   # --- profiles: worker (mac/cpu dev) ---
@@ -357,3 +384,4 @@ volumes:
   trt_cache:
   prometheus_data:
   grafana_data:
+  redis_data:

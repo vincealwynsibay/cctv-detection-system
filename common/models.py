@@ -347,3 +347,24 @@ class AggregationSummary(Base):
     object_type     = Column(String(50), primary_key=True)
     window_start    = Column(DateTime(timezone=True), primary_key=True)
     count           = Column(Integer,    nullable=False)
+
+
+class EnforcementEvent(Base):
+    """Retained enforcement events (plate reads, violations) drained from the
+    Redis Stream by sink/sink.py. Unlike `detections` (a 72h-retention Timescale
+    hypertable), these are kept; `event_id` is the idempotency key that makes
+    the sink's at-least-once replay effectively-once. See migration 0020 and
+    experiments/durable-sink/ for the failure-mode rationale."""
+    __tablename__ = "enforcement_events"
+
+    id           = Column(BigInteger, primary_key=True, autoincrement=True)
+    event_id     = Column(Text,        nullable=False, unique=True)
+    event_type   = Column(String(40),  nullable=False)
+    cctv_id      = Column(Integer,     nullable=True)  # plain int, no write-time FK (see migration 0020)
+    track_id     = Column(Integer,     nullable=True)
+    plate        = Column(String(16),  nullable=True)
+    vehicle_type = Column(String(50),  nullable=True)
+    confidence   = Column(Float,       nullable=True)
+    captured_at  = Column(DateTime(timezone=True), nullable=False)
+    meta         = Column(JSON,        nullable=True)
+    stored_at    = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)

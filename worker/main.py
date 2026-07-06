@@ -19,6 +19,7 @@ from ultralytics import YOLO
 
 from common import models
 from common.database import Base, SessionLocal, engine
+from common.durable import emit_enforcement_event
 from common.geometry import is_point_in_polygon
 from common.overlay import draw_boxes as overlay_draw_boxes
 from worker.claim import try_claim_camera, release_camera, verify_claim
@@ -37,6 +38,12 @@ READER_MAX_FPS        = float(os.getenv("READER_MAX_FPS", "0"))    # 0 = unlimit
 # duplicate decode + the box/frame timestamp matching dance.
 PUBLISH_FRAMES        = os.getenv("WORKER_PUBLISHES_FRAMES", "0") == "1"
 FRAME_JPEG_QUALITY    = int(os.getenv("WORKER_FRAME_JPEG_QUALITY", "75"))
+# When 1, emit a durable enforcement-event to the Redis Stream on each new
+# vehicle track (drained to enforcement_events by sink/sink.py). Default 0 =
+# off, so the existing detection path is completely unchanged. This is the seam
+# future plate-OCR / violation classifiers plug into.
+EMIT_ENFORCEMENT      = os.getenv("DURABLE_ENFORCEMENT", "0") == "1"
+ENFORCEMENT_CLASSES   = {"car", "motorcycle", "truck", "bus", "jeepney"}
 PRUNE_INTERVAL_SEC    = 10
 TRACK_MAX_AGE_SEC     = 30
 FPS_SAMPLE_INTERVAL   = 30
@@ -513,6 +520,18 @@ def process_detection(
             return
 
         state.db_detection_id = int(detection.id)  # type: ignore
+
+        # Durable enforcement-event seam (opt-in via DURABLE_ENFORCEMENT=1).
+        # A new vehicle track becomes an enforcement candidate; plate OCR /
+        # violation rules will fill in `plate` / `event_type` later. Emission is
+        # best-effort and never blocks or crashes the detection loop.
+        if EMIT_ENFORCEMENT and cls_name in ENFORCEMENT_CLASSES:
+            emit_enforcement_event(
+                cctv_id=cctv_id,
+                track_id=track_id,
+                vehicle_type=cls_name,
+                confidence=confidence,
+            )
 
         for region in regions:
             if is_point_in_polygon(center, [(p["x"], p["y"]) for p in region["region_points"]]):
