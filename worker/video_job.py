@@ -206,17 +206,18 @@ def process_video(video_id: int) -> None:
                 cy = ((y1 + y2) / 2) / frame_h
                 center = (cx, cy)
 
-                # Region matching only applies when we have a CCTV with regions
+                # Regions are optional: they only *attribute* a detection to a
+                # street/direction, they don't gate whether it's counted. Every
+                # detection is inserted; in-region ones additionally get linked
+                # to their region(s). This mirrors the live worker
+                # (worker/main.py:process_detection), which never drops
+                # out-of-region detections.
                 matching_regions: list[dict] = []
-                if cctv_id is not None:
+                if cctv_id is not None and regions:
                     matching_regions = [
                         r for r in regions
                         if is_point_in_polygon(center, [(p["x"], p["y"]) for p in r["region_points"]])
-                    ] if regions else []
-
-                    # If regions are configured but the object is outside all of them, skip
-                    if regions and not matching_regions:
-                        continue
+                    ]
 
                 detection = models.Detection(  # type: ignore[call-arg]
                     cctv_id=cctv_id,
