@@ -25,11 +25,10 @@ import {
   ArrowRight, Activity, Clock,
   CheckCircle2, Camera, BookOpen,
 } from 'lucide-react';
-import { statusBucket, BUCKET_LABEL, BUCKET_BADGE_CLASS } from '@/components/recommendations/statusBucket';
 import { JargonTip } from '@/components/JargonTip';
 import { WarrantReference } from '@/components/WarrantReference';
 import { cn } from '@/lib/utils';
-import { deriveIntersectionAction, MONITOR_THRESHOLD_VH } from '@/lib/intersectionAction';
+import { deriveIntersectionAction, MONITOR_THRESHOLD_VH, type ActionKind } from '@/lib/intersectionAction';
 
 // ── Time-of-day chunks (mirror server/tod.py TOD_DEFAULTS) ───────────────────
 
@@ -210,6 +209,31 @@ function formatPeakHour(iso: string | null): string {
 }
 
 
+// ── Action colour language ───────────────────────────────────────────────────
+// One severity ramp for the whole card so its bar, badge and cycle line never
+// disagree: green = nothing to do, sky = timing tweak, amber = install a signal,
+// red = widen, slate = monitor. Sourcing colour from the reconciled action (not
+// the raw warrant bucket) is what fixes "green says it passed but I'm still told
+// to retime": a warranted-but-signalized intersection is a timing update (sky),
+// not "Warranted" (green).
+const ACTION_BAR: Record<ActionKind, string> = {
+  no_action:      'bg-emerald-500',
+  adjust_timing:  'bg-sky-500',
+  install_signal: 'bg-amber-500',
+  widen_lanes:    'bg-red-500',
+  monitor:        'bg-slate-400',
+  no_analysis:    'bg-muted/40',
+};
+
+const ACTION_BADGE: Record<ActionKind, { label: string; className: string }> = {
+  no_action:      { label: 'Within warrants',  className: 'border-emerald-500/40 text-emerald-700 bg-emerald-50 dark:text-emerald-300 dark:bg-emerald-950/30' },
+  adjust_timing:  { label: 'Timing update',    className: 'border-sky-500/40 text-sky-700 bg-sky-50 dark:text-sky-400 dark:bg-sky-950/30' },
+  install_signal: { label: 'Signal warranted', className: 'border-amber-500/40 text-amber-700 bg-amber-50 dark:text-amber-300 dark:bg-amber-950/30' },
+  widen_lanes:    { label: 'Widen lanes',      className: 'border-red-500/40 text-red-700 bg-red-50 dark:text-red-300 dark:bg-red-950/30' },
+  monitor:        { label: 'Monitor',          className: 'border-slate-400/40 text-slate-600 bg-slate-50 dark:text-slate-300 dark:bg-slate-900/30' },
+  no_analysis:    { label: 'No analysis yet',  className: 'border-muted text-muted-foreground bg-muted/40' },
+};
+
 // ── Warrant badge ────────────────────────────────────────────────────────────
 
 function WarrantBadge({ rec, inter }: { rec: RecommendationResponse | undefined; inter: Intersection }) {
@@ -220,21 +244,13 @@ function WarrantBadge({ rec, inter }: { rec: RecommendationResponse | undefined;
       </Badge>
     );
   }
-  // For signalized intersections the action is a timing adjustment - MUTCD
-  // warrants gate signal *installation*, so "Warranted / Not warranted" is
-  // the wrong label. Show "Timing update" instead.
-  const action = deriveIntersectionAction(rec, inter);
-  if (action.kind === 'adjust_timing') {
-    return (
-      <Badge variant="outline" className="text-[10px] border-sky-200 text-sky-700 bg-sky-50 dark:border-sky-800 dark:text-sky-400 dark:bg-sky-950/30">
-        Timing update
-      </Badge>
-    );
-  }
-  const b = statusBucket(rec);
+  // Label + colour follow the reconciled action, not the raw warrant bucket:
+  // MUTCD warrants gate signal *installation*, so on an already-signalized
+  // intersection a met warrant is a timing update, not "Warranted".
+  const b = ACTION_BADGE[deriveIntersectionAction(rec, inter).kind];
   return (
-    <Badge variant="outline" className={cn('text-[10px]', BUCKET_BADGE_CLASS[b])}>
-      {BUCKET_LABEL[b]}
+    <Badge variant="outline" className={cn('text-[10px]', b.className)}>
+      {b.label}
     </Badge>
   );
 }
@@ -254,7 +270,7 @@ interface CardProps {
 
 function IntersectionCard({ inter, cameras, rec, streets, liveCount, dailyStats, onRefresh, onOpenSettings }: CardProps) {
   const [generating, setGenerating] = useState(false);
-  const bucket = rec ? statusBucket(rec) : null;
+  const action = rec ? deriveIntersectionAction(rec, inter) : null;
   const offlineCount = cameras.filter(c => c.status !== 'online').length;
 
   async function generate() {
@@ -276,13 +292,7 @@ function IntersectionCard({ inter, cameras, rec, streets, liveCount, dailyStats,
 
   return (
     <div data-testid="intersection-card" data-intersection-id={inter.id} className="rounded-xl border border-border bg-card flex flex-col overflow-hidden h-full">
-      <div className={cn(
-        'h-1',
-        bucket === 'warranted'     && 'bg-emerald-500',
-        bucket === 'borderline'    && 'bg-amber-400',
-        bucket === 'not_warranted' && 'bg-muted',
-        (bucket === 'no_data' || !bucket) && 'bg-muted/40',
-      )} />
+      <div className={cn('h-1', action ? ACTION_BAR[action.kind] : 'bg-muted/40')} />
 
       <div className="p-3 flex flex-col gap-2 flex-1">
         <div className="flex items-start justify-between gap-1.5">
@@ -326,8 +336,8 @@ function IntersectionCard({ inter, cameras, rec, streets, liveCount, dailyStats,
           </div>
         </div>
 
-        {bucket === 'warranted' && rec?.timing_cycle && (
-          <div className="flex items-center gap-1.5 text-[11px] text-emerald-700 dark:text-emerald-400">
+        {action?.kind === 'adjust_timing' && rec?.timing_cycle && (
+          <div className="flex items-center gap-1.5 text-[11px] text-sky-700 dark:text-sky-400">
             <TrendingUp className="size-3 shrink-0" />
             <span className="font-medium truncate">{rec.timing_cycle}s cycle{rec.timing_chunk && ` · ${rec.timing_chunk}`}</span>
           </div>

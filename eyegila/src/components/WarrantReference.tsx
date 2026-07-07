@@ -4,7 +4,6 @@ import {
   Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger,
 } from '@/components/ui/dialog';
 import { Badge } from '@/components/ui/badge';
-import { cn } from '@/lib/utils';
 import type { RecommendationResponse } from '@/services/recommendations';
 import { WARRANTS, warrantStatuses, type WarrantGroup, type WarrantInfo } from '@/lib/warrants';
 
