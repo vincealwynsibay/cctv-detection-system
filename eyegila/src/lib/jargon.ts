@@ -27,22 +27,46 @@ export const JARGON: Record<string, JargonEntry> = {
     manualAnchor: 'mutcd-warrant',
   },
   w1: {
-    term: 'Warrant 1',
+    term: 'Warrant 1 - Eight-Hour Vehicular Volume',
     short:
-      'Peak-hour volume met - the busiest hour of the day exceeds the MUTCD threshold for an 8-hour cumulative volume study.',
+      'Combined major + minor street volume clears the MUTCD threshold in at least 8 of any 24 hours. For intersections that stay busy through most of the day.',
+    manualTab: 'warrants',
     manualAnchor: 'warrant-1',
   },
   w2: {
-    term: 'Warrant 2',
+    term: 'Warrant 2 - Four-Hour Vehicular Volume',
     short:
-      'Four-hour volume met - at least four hours in the day exceed the MUTCD threshold.',
+      'Each of the four busiest hours clears the combined major/minor volume threshold. Catches strong but shorter peaks that Warrant 1 misses.',
+    manualTab: 'warrants',
     manualAnchor: 'warrant-2',
   },
   w4: {
-    term: 'Warrant 4',
+    term: 'Warrant 4 - Pedestrian Volume',
     short:
-      'Pedestrian volume met - pedestrian crossings exceed the MUTCD pedestrian-volume threshold.',
+      'Pedestrian crossing demand meets the MUTCD pedestrian threshold against major-street traffic. Protects crossings where gaps are scarce.',
+    manualTab: 'warrants',
     manualAnchor: 'warrant-4',
+  },
+  wl1: {
+    term: 'WL-1 - High Motorcycle / Pedicab Share',
+    short:
+      'Local warrant (Tagum City): motorcycles, tricycles and pedicabs make up 60% or more of vehicles in a time-of-day chunk. Their behaviour differs from the car-based MUTCD volumes.',
+    manualTab: 'warrants',
+    manualAnchor: 'warrant-local-1',
+  },
+  wl2: {
+    term: 'WL-2 - Peak Concentration',
+    short:
+      "Local warrant: the busiest one or two time-of-day chunks carry 70% or more of the day's volume, so time-of-day timing pays off.",
+    manualTab: 'warrants',
+    manualAnchor: 'warrant-local-2',
+  },
+  wl3: {
+    term: 'WL-3 - Lights-Off Candidate',
+    short:
+      'Local warrant: an approach averages under 30 PCU/hr in a chunk, quiet enough to flash the signal instead of running full operation.',
+    manualTab: 'warrants',
+    manualAnchor: 'warrant-local-3',
   },
   websters: {
     term: 'Webster’s timing',

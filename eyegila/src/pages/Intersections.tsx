@@ -23,10 +23,11 @@ import {
   Loader2, TrendingUp, AlertTriangle,
   Rocket, LayoutGrid, Map as MapIcon, MonitorPlay,
   ArrowRight, Activity, Clock,
-  CheckCircle2, Camera,
+  CheckCircle2, Camera, BookOpen,
 } from 'lucide-react';
 import { statusBucket, BUCKET_LABEL, BUCKET_BADGE_CLASS } from '@/components/recommendations/statusBucket';
 import { JargonTip } from '@/components/JargonTip';
+import { WarrantReference } from '@/components/WarrantReference';
 import { cn } from '@/lib/utils';
 import { deriveIntersectionAction, MONITOR_THRESHOLD_VH } from '@/lib/intersectionAction';
 
@@ -294,6 +295,7 @@ function IntersectionCard({ inter, cameras, rec, streets, liveCount, dailyStats,
                 {inter.signal_status.replace('_', ' ')}
               </Badge>
               <WarrantBadge rec={rec} inter={inter} />
+              {rec && <WarrantReference rec={rec} intersectionName={inter.name} />}
             </div>
           </div>
           <button
@@ -520,7 +522,7 @@ function CamerasCard({ cameras }: { cameras: CCTV[] }) {
 
 type InterventionKind = 'signalize' | 'road_widening' | 'timing_only';
 
-// Two lanes — the previous third ("Later today" for future-TOD-chunk timing
+// Two lanes: the previous third ("Later today" for future-TOD-chunk timing
 // recs) doubled the mental model without giving operators any decision they
 // couldn't make from the chunkLabel pill on the row.
 //   deploy   → timing change to push to the controller (current or future chunk)
@@ -693,7 +695,7 @@ function buildActionItem(
   if (action.kind === 'adjust_timing') {
     // All timing recs land in the deploy lane. Future-chunk recs surface a
     // chunk-name pill on the row so operators can see at a glance that this
-    // applies later in the day; that's enough context — no need for a
+    // applies later in the day; that's enough context, no need for a
     // separate "Later today" lane.
     const chunk = rec.timing_chunk;
     const sameChunk = chunk == null || chunk === currentChunkName;
@@ -1027,6 +1029,20 @@ function DashboardStrip({
               : <RefreshCw className="size-3.5" />}
           </Button>
         )}
+
+        <WarrantReference
+          trigger={
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 px-2"
+              title="What each signal warrant means"
+            >
+              <BookOpen className="size-3.5 mr-1" />
+              Warrants
+            </Button>
+          }
+        />
 
         <Button
           size="sm"

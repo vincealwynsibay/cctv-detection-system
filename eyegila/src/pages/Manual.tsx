@@ -9,6 +9,7 @@ import {
   MapPin, Camera, Layers, BarChart3, GitBranch,
   Lightbulb, Info, AlertTriangle, ArrowRight,
 } from 'lucide-react';
+import { WARRANTS } from '@/lib/warrants';
 
 const MANUAL_TABS = ['quickstart', 'intersections', 'cameras', 'regions', 'monitoring', 'warrants'] as const;
 type ManualTab = typeof MANUAL_TABS[number];
@@ -405,33 +406,38 @@ export function ManualPage() {
               </p>
 
               <Sub>Warrants Evaluated</Sub>
-              <div className="flex flex-col gap-3 mb-4">
-                {[
-                  {
-                    badge: 'Warrant 1',
-                    title: 'Eight-Hour Vehicular Volume',
-                    desc: 'Checks if vehicle volume on the major and minor streets meets the MUTCD threshold across 8 of any 24 hours. Designed for intersections with steady, high-volume traffic throughout the day.',
-                  },
-                  {
-                    badge: 'Warrant 2',
-                    title: 'Four-Hour Vehicular Volume',
-                    desc: 'Similar to Warrant 1 but requires only 4 of the highest-volume hours to meet the combined volume threshold. Suited for intersections with pronounced but shorter peak periods.',
-                  },
-                  {
-                    badge: 'Warrant 4',
-                    title: 'Pedestrian Volume',
-                    desc: 'Evaluates pedestrian crossing demand against vehicle volume thresholds. A signal may be warranted if pedestrian volume creates safety risks at the crossing.',
-                  },
-                ].map(w => (
-                  <div key={w.badge} className="rounded-lg border border-border p-4">
-                    <div className="flex items-start gap-2 mb-1.5">
-                      <Badge variant="outline" className="text-[11px] flex-shrink-0">{w.badge}</Badge>
-                      <h4 className="text-sm font-medium leading-none mt-0.5">{w.title}</h4>
-                    </div>
-                    <p className="text-xs text-muted-foreground leading-relaxed">{w.desc}</p>
+              <p className="text-sm text-muted-foreground mb-3">
+                EyeGila checks three national MUTCD warrants plus three local warrants tuned to
+                Tagum City traffic. "Met" means the condition is satisfied; at an intersection that
+                already has a signal, a met warrant becomes a timing change rather than a new signal.
+              </p>
+              {(['mutcd', 'local'] as const).map(group => (
+                <div key={group} className="mb-4">
+                  <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">
+                    {group === 'mutcd'
+                      ? 'MUTCD warrants (national standard)'
+                      : 'Local warrants (Tagum City conditions)'}
+                  </h4>
+                  <div className="flex flex-col gap-3">
+                    {WARRANTS.filter(w => w.group === group).map(w => (
+                      <div key={w.code} id={w.anchor} className="scroll-mt-20 rounded-lg border border-border p-4">
+                        <div className="flex items-start gap-2 mb-1.5">
+                          <Badge variant="outline" className="text-[11px] flex-shrink-0 font-mono">{w.code}</Badge>
+                          <h4 className="text-sm font-medium leading-none mt-0.5">{w.name}</h4>
+                        </div>
+                        <p className="text-xs text-muted-foreground leading-relaxed">{w.purpose}</p>
+                        <p className="text-xs text-muted-foreground leading-relaxed mt-1.5">
+                          <span className="font-medium text-foreground/70">Triggers when: </span>{w.triggersWhen}
+                        </p>
+                        <p className="text-[11px] text-muted-foreground/80 mt-1">
+                          <span className="font-medium">Threshold: </span>{w.threshold}{' '}
+                          <span className="opacity-70">({w.ref})</span>
+                        </p>
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
+                </div>
+              ))}
 
               <Sub><span id="recommendation" className="scroll-mt-20">Running a Recommendation</span></Sub>
               <Step n={1}>Navigate to <strong>Recommendations</strong>.</Step>
