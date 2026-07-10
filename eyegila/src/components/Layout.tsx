@@ -3,7 +3,6 @@ import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { OnboardingWizard } from '@/components/OnboardingWizard';
 import { onboardingApi } from '@/services/onboarding';
 import { intersectionsApi } from '@/services/intersections';
-import { recommendationsApi, type RecommenderModelInfo } from '@/services/recommendations';
 import { useAuth } from '@/hooks/useAuth';
 import { useSSE, type SSEStatus } from '@/hooks/useSSE';
 import type { AggregationRow, Intersection } from '@/types';
@@ -20,7 +19,7 @@ import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover
 import { SetupProgressPopoverContent } from '@/components/SetupProgressPopover';
 import {
   BarChart3, MapPin, Users, LogOut,
-  Wifi, WifiOff, Loader2, ServerCrash, Video, Camera, Cpu,
+  Wifi, WifiOff, Loader2, ServerCrash, Video, Camera,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -38,56 +37,6 @@ const SSE_INDICATOR: Record<SSEStatus, { icon: React.ReactNode; label: string; c
   disconnected:  { icon: <WifiOff className="size-3 text-destructive" />,        label: 'Offline',       color: 'text-destructive',  tip: 'Stream dropped - retrying…'       },
   server_offline:{ icon: <ServerCrash className="size-3 text-destructive" />,    label: 'Server offline',color: 'text-destructive',  tip: 'Server unreachable - retrying…'   },
 };
-
-function RecommenderBadge({ info }: { info: RecommenderModelInfo | null }) {
-  // When info hasn't loaded yet we render nothing so the header doesn't flash.
-  // Once loaded, we always render — the badge is the panel-defense demo's
-  // single visible proof of which warrant CNN is currently in production.
-  if (!info) return null;
-  const variant = info.variant ?? (info.mode === 'scalar_baseline' ? 'fallback' : 'custom');
-  const label = (() => {
-    if (info.mode === 'scalar_baseline') return 'Scalar baseline';
-    if (variant === 'synthetic_baseline')   return 'Synthetic CNN';
-    if (variant === 'real_trained_toronto') return 'Real-trained CNN';
-    return 'Custom CNN';
-  })();
-  const tone = (() => {
-    if (info.mode === 'scalar_baseline')    return 'text-muted-foreground border-muted-foreground/20';
-    if (variant === 'real_trained_toronto') return 'text-emerald-600 border-emerald-500/40 bg-emerald-50/50';
-    if (variant === 'synthetic_baseline')   return 'text-amber-700 border-amber-500/40 bg-amber-50/50';
-    return 'text-blue-700 border-blue-500/40 bg-blue-50/50';
-  })();
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <div className={cn(
-          'flex items-center gap-1.5 px-2 py-1 rounded-md text-xs border',
-          tone,
-        )}>
-          <Cpu className="size-3" />
-          <span className="font-medium">{label}</span>
-        </div>
-      </TooltipTrigger>
-      <TooltipContent side="bottom" className="max-w-[320px]">
-        <div className="space-y-1 text-xs">
-          <div className="font-semibold">Recommender model</div>
-          {info.training_data_source && (
-            <div><span className="text-muted-foreground">Source:</span> {info.training_data_source}</div>
-          )}
-          {info.warrant_names && (
-            <div><span className="text-muted-foreground">Heads:</span> {info.warrant_names.length} warrants ({info.warrant_names.join(', ')})</div>
-          )}
-          {info.checkpoint_path && (
-            <div className="font-mono text-[10px] break-all opacity-70">{info.checkpoint_path}</div>
-          )}
-          {info.detail && (
-            <div className="text-muted-foreground">{info.detail}</div>
-          )}
-        </div>
-      </TooltipContent>
-    </Tooltip>
-  );
-}
 
 
 function SSEIndicator({ status }: { status: SSEStatus }) {
@@ -115,18 +64,12 @@ export function Layout() {
   const [savedStep,        setSavedStep]        = useState<string | null>(null);
   const [intersectionList, setIntersectionList] = useState<Intersection[]>([]);
   const [setupPopoverOpen, setSetupPopoverOpen] = useState(false);
-  const [recommenderInfo,  setRecommenderInfo]  = useState<RecommenderModelInfo | null>(null);
-
   function fetchIntersections() {
     intersectionsApi.list().then(setIntersectionList).catch(() => {});
   }
 
   useEffect(() => {
     if (!token) return;
-    // Recommender info is fetched once per session and cached in state. The
-    // badge in the header is informational only, so a refresh-on-error /
-    // retry loop is unnecessary; if the endpoint fails we simply omit it.
-    recommendationsApi.modelInfo().then(setRecommenderInfo).catch(() => setRecommenderInfo(null));
     onboardingApi.getProgress()
       .then(p => setSavedStep(p.step))
       .catch(() => {});

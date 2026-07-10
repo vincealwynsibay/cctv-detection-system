@@ -103,7 +103,6 @@ function detectIpGroups(found: { key: string; address: string }[]): IpGroup[] {
     for (let i = 1; i <= entries.length; i++) {
       const broken = i === entries.length || entries[i].octet !== entries[i - 1].octet + 1;
       if (broken) {
-        const runLen = i - runStart;
         // Emit every 4-IP chunk inside the run. Leftover tail (<4) stays ungrouped.
         for (let s = runStart; s + 4 <= i; s += 4) {
           const block = entries.slice(s, s + 4);
@@ -442,10 +441,6 @@ export function OnboardingWizard({ open, initialStep, onClose }: OnboardingWizar
 
   function toggleCamera(key: string) {
     setFound(prev => prev.map(f => f.key === key ? { ...f, selected: !f.selected } : f));
-  }
-
-  function updateRtsp(key: string, url: string) {
-    setFound(prev => prev.map(f => f.key === key ? { ...f, rtsp_url: url } : f));
   }
 
   function updateCameraField(key: string, field: 'name' | 'direction', value: string) {

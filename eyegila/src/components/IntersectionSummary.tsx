@@ -150,7 +150,7 @@ function buildRoadComparison(
   const minorLabel = minorRows.map(r => r.label.split(' - ')[0]).join(' + ');
 
   const sum = (xs: (number | null)[]) =>
-    xs.some(x => x != null) ? xs.reduce((s, x) => s + (x ?? 0), 0) : null;
+    xs.some(x => x != null) ? xs.reduce<number>((s, x) => s + (x ?? 0), 0) : null;
 
   return {
     majorLabel:         major.label,

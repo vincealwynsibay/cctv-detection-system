@@ -13,7 +13,6 @@ import { ARM_SHORT, GanttDiagram, LosBadge } from '@/components/signal-timing-vi
 import {
   statusBucket, BUCKET_LABEL,
 } from '@/components/recommendations/statusBucket';
-import { deriveIntersectionAction } from '@/lib/intersectionAction';
 import { cn } from '@/lib/utils';
 
 function fmt(n: number | null | undefined, unit = 's'): string {
@@ -311,7 +310,6 @@ export function IntersectionReportPage() {
     : (timing[0] ?? null);
   const bucket = rec ? statusBucket(rec) : null;
   const ds = sim?.daily_summary ?? null;
-  const action = deriveIntersectionAction(rec, intersection, { sim });
   const usableStreets = streets.filter(s => s.arm_direction !== 'unknown');
 
   const currentApproaches = usableStreets.map(s => ({

@@ -3,6 +3,8 @@ import { useParams, Link } from 'react-router-dom';
 import { cctvsApi } from '@/services/cctvs';
 import { useIntersectionShell } from '@/components/IntersectionShell';
 import { deriveIntersectionAction } from '@/lib/intersectionAction';
+import { WarrantReference } from '@/components/WarrantReference';
+import { warrantStatuses } from '@/lib/warrants';
 import { RefreshCw, WifiOff } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -31,7 +33,7 @@ export function IntersectionDetailPage() {
   }, [rec]);
 
   const vcCritical = useMemo(() => {
-    if (!sim?.chunks?.length) return sim?.daily_summary?.vc_ratio_before ?? null;
+    if (!sim?.chunks?.length) return null;
     return sim.chunks.reduce((max, c) =>
       (c.vc_ratio_before ?? 0) > (max ?? 0) ? (c.vc_ratio_before ?? 0) : max, null as number | null,
     );
@@ -77,6 +79,49 @@ export function IntersectionDetailPage() {
                   <div className="text-[10.5px] text-muted-foreground mt-1.5">busiest hour</div>
                 </div>
               </div>
+
+              {rec && (() => {
+                const statuses = warrantStatuses(rec);
+                return statuses.length > 0 ? (
+                  <div className="mt-5 pt-4 border-t border-border">
+                    <div className="flex items-center justify-between mb-3">
+                      <p className="text-[14px] font-semibold text-foreground/70">Warrant status</p>
+                      <WarrantReference
+                        rec={rec}
+                        intersectionName={intersection?.name}
+                        actionKind={action.kind}
+                        trigger={
+                          <button type="button" className="text-[11px] text-muted-foreground hover:text-foreground transition-colors underline underline-offset-2 decoration-dotted">
+                            What are warrants?
+                          </button>
+                        }
+                      />
+                    </div>
+                    <div className="flex flex-col gap-2">
+                      {statuses.map(s => {
+                        const pct = s.confidence != null ? Math.round(s.confidence * 100) : null;
+                        return (
+                          <div key={s.info.code} className="flex items-center gap-2">
+                            <span className="font-mono text-[10px] text-muted-foreground w-8 shrink-0">{s.info.code}</span>
+                            <div className="flex-1 h-1.5 rounded-full bg-muted overflow-hidden">
+                              <div
+                                className={cn('h-full rounded-full transition-all', s.met ? 'bg-emerald-500' : 'bg-muted-foreground/25')}
+                                style={{ width: `${Math.min(pct ?? 0, 100)}%` }}
+                              />
+                            </div>
+                            <span className="text-[10px] tabular-nums text-muted-foreground w-7 text-right shrink-0">
+                              {pct != null ? `${pct}%` : '-'}
+                            </span>
+                            <span className={cn('text-[9px] font-bold uppercase tracking-wide w-12 shrink-0', s.met ? 'text-emerald-600 dark:text-emerald-400' : 'text-muted-foreground')}>
+                              {s.met ? 'Met' : 'Not met'}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : null;
+              })()}
 
               {streets.length > 0 && (
                 <div className="mt-7">

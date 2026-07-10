@@ -26,6 +26,7 @@ from typing import Optional
 import redis
 
 ENFORCEMENT_STREAM = os.getenv("ENFORCEMENT_STREAM", "enforcement_events")
+DETECTIONS_STREAM  = os.getenv("DETECTIONS_STREAM",  "detections_buffer")
 # Cap the stream so a prolonged DB outage can't grow it without bound. ~1M
 # events is hours of headroom; approximate trimming (~) is cheap.
 STREAM_MAXLEN = int(os.getenv("ENFORCEMENT_STREAM_MAXLEN", "1000000"))
@@ -86,3 +87,66 @@ def emit_enforcement_event(
     except Exception as e:  # redis down / any transport error - best effort
         print(f"[durable] emit failed (event dropped at source): {e}")
         return None
+
+
+def emit_detection(
+    *,
+    detection_uuid: str,
+    cctv_id: int,
+    track_id: int,
+    object_type: str,
+    confidence: float,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    initial_region_ids: Optional[list] = None,
+    captured_at: Optional[datetime] = None,
+) -> bool:
+    """Emit a detection to the durable stream. Returns True on success.
+    On first sighting the worker generates a UUID, calls this once with all
+    regions the vehicle is already inside (initial_region_ids), and never
+    touches the DB. The detection-sink drains and inserts both the detection
+    row and the initial region entries atomically."""
+    captured_at = captured_at or datetime.now(timezone.utc)
+    payload = {
+        "type":           "detection",
+        "detection_uuid": detection_uuid,
+        "cctv_id":        cctv_id,
+        "track_id":       track_id,
+        "object_type":    object_type,
+        "confidence":     round(float(confidence), 4),
+        "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+        "captured_at":    captured_at.astimezone(timezone.utc).isoformat(),
+        "region_ids":     initial_region_ids or [],
+    }
+    try:
+        _client().xadd(
+            DETECTIONS_STREAM,
+            {"data": json.dumps(payload)},
+            maxlen=STREAM_MAXLEN,
+            approximate=True,
+        )
+        return True
+    except Exception as e:
+        print(f"[durable] detection emit failed (dropped): {e}")
+        return False
+
+
+def emit_detection_region(*, detection_uuid: str, region_id: int) -> bool:
+    """Emit a region-entry event for a detection entering a new region on a
+    subsequent frame. The detection event (with its initial_region_ids) was
+    already emitted on first sighting, so the sink will always see the
+    detection before these region events."""
+    payload = {"type": "region", "detection_uuid": detection_uuid, "region_id": region_id}
+    try:
+        _client().xadd(
+            DETECTIONS_STREAM,
+            {"data": json.dumps(payload)},
+            maxlen=STREAM_MAXLEN,
+            approximate=True,
+        )
+        return True
+    except Exception as e:
+        print(f"[durable] region emit failed (dropped): {e}")
+        return False

@@ -5,6 +5,7 @@ import queue
 import signal
 import threading
 import time
+import uuid as _uuid
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,12 +15,29 @@ import cv2
 import numpy as np
 import redis as redis_lib
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, InterfaceError
 from sqlalchemy.orm import Session
+
+
+def _recycle_session(db):
+    """After a lost connection, plain rollback() raises 'Can't reconnect until
+    invalid transaction is rolled back' on the very next query. The only way
+    out is to drop the session entirely and hand back a fresh one that pulls
+    a new connection from the pool. Same pattern as worker/heartbeat.py."""
+    try:
+        db.rollback()
+    except Exception:
+        pass
+    try:
+        db.close()
+    except Exception:
+        pass
+    return SessionLocal()
 from ultralytics import YOLO
 
 from common import models
 from common.database import Base, SessionLocal, engine
-from common.durable import emit_enforcement_event
+from common.durable import emit_enforcement_event, emit_detection, emit_detection_region
 from common.geometry import is_point_in_polygon
 from common.overlay import draw_boxes as overlay_draw_boxes
 from worker.claim import try_claim_camera, release_camera, verify_claim
@@ -44,6 +62,7 @@ FRAME_JPEG_QUALITY    = int(os.getenv("WORKER_FRAME_JPEG_QUALITY", "75"))
 # future plate-OCR / violation classifiers plug into.
 EMIT_ENFORCEMENT      = os.getenv("DURABLE_ENFORCEMENT", "0") == "1"
 ENFORCEMENT_CLASSES   = {"car", "motorcycle", "truck", "bus", "jeepney"}
+DURABLE_DETECTIONS    = os.getenv("DURABLE_DETECTIONS", "0") == "1"
 PRUNE_INTERVAL_SEC    = 10
 TRACK_MAX_AGE_SEC     = 30
 FPS_SAMPLE_INTERVAL   = 30
@@ -61,7 +80,8 @@ _DUMMY_FRAME = np.zeros((480, 854, 3), dtype=np.uint8)
 class TrackState:
     track_id: int
     cls_name: str
-    db_detection_id: Optional[int] = None
+    db_detection_id: Optional[int] = None   # legacy direct-DB path
+    detection_uuid: Optional[str] = None    # durable stream path
     regions_entered: Set[int] = field(default_factory=set)
     last_seen_ts: float = field(default_factory=time.time)
 
@@ -199,23 +219,34 @@ def main() -> None:
     print(f"[worker]   FERNET_KEY         = {'set' if os.getenv('FERNET_KEY') else 'NOT SET'}")
     print(f"[worker] ────────────────────────────────────────")
 
-    Base.metadata.create_all(bind=engine)
-    db = SessionLocal()
-    # Guard the DDL with an existence check so ALTER TABLE (which acquires
-    # AccessExclusiveLock even with IF NOT EXISTS) is never run after the
-    # initial migration - the hot-restart path stays completely lock-free.
-    try:
-        needs_col = not db.execute(text(
-            "SELECT 1 FROM information_schema.columns "
-            "WHERE table_name = 'worker_heartbeats' AND column_name = 'last_error'"
-        )).scalar()
-        if needs_col:
-            db.execute(text(
-                "ALTER TABLE worker_heartbeats ADD COLUMN last_error VARCHAR(500)"
-            ))
-        db.commit()
-    except Exception:
-        db.rollback()
+    # Wait for the DB before proceeding - if it is down at boot we would rather
+    # loop here than crash and get restarted forever by docker. Once we get
+    # through this block the main loop can tolerate individual DB failures.
+    while True:
+        try:
+            Base.metadata.create_all(bind=engine)
+            db = SessionLocal()
+            # Guard the DDL with an existence check so ALTER TABLE (which
+            # acquires AccessExclusiveLock even with IF NOT EXISTS) is never
+            # run after the initial migration - the hot-restart path stays
+            # completely lock-free.
+            needs_col = not db.execute(text(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = 'worker_heartbeats' AND column_name = 'last_error'"
+            )).scalar()
+            if needs_col:
+                db.execute(text(
+                    "ALTER TABLE worker_heartbeats ADD COLUMN last_error VARCHAR(500)"
+                ))
+            db.commit()
+            break
+        except (OperationalError, InterfaceError) as e:
+            print(f"[worker] DB unavailable at startup, retrying in 3s: {str(e).splitlines()[0]}")
+            try:
+                db.rollback()  # type: ignore[name-defined]
+            except Exception:
+                pass
+            time.sleep(3)
     model = _load_model()
 
     # warm up GPU kernels so first real frame isn't slow
@@ -233,7 +264,12 @@ def main() -> None:
 
     # claim initial batch of cameras
     while len(slots) < CAMERAS_PER_WORKER:
-        result = try_claim_camera(db)
+        try:
+            result = try_claim_camera(db)
+        except (OperationalError, InterfaceError) as e:
+            print(f"[worker] initial claim aborted, DB unavailable: {str(e).splitlines()[0]}")
+            db = _recycle_session(db)
+            break
         if result is None:
             break
         cctv, version = result
@@ -248,10 +284,16 @@ def main() -> None:
 
             # fill any open slots
             if len(slots) < CAMERAS_PER_WORKER and now - last_claim_attempt >= RECLAIM_INTERVAL:
-                result = try_claim_camera(db)
-                if result is not None:
-                    cctv, version = result
-                    slots.append(_start_slot(cctv, version, args, db))
+                try:
+                    result = try_claim_camera(db)
+                    if result is not None:
+                        cctv, version = result
+                        slots.append(_start_slot(cctv, version, args, db))
+                except (OperationalError, InterfaceError):
+                    # DB is down; skip this refill cycle, keep detecting on
+                    # the cameras we already own. The claim-check loop below
+                    # protects us with a long CLAIM_EXPIRY_SEC.
+                    db = _recycle_session(db)
                 last_claim_attempt = now
 
             target_h, target_w = _DUMMY_FRAME.shape[:2]
@@ -395,14 +437,25 @@ def main() -> None:
                         _rdb = SessionLocal()
                         try:
                             slot.regions = initialize_regions(_rdb, slot.cctv_id)
+                            slot.last_region_refresh_ts = now
+                        except (OperationalError, InterfaceError):
+                            # DB unreachable; keep the cached regions and try
+                            # again next cycle. Detection continues normally.
+                            print(f"[worker cctv={slot.cctv_id}] region refresh skipped: DB unavailable")
                         finally:
                             _rdb.close()
-                        slot.last_region_refresh_ts = now
 
                     # verify claim fencing token
                     if slot.frame_count % CLAIM_CHECK_FRAMES == 0:
-                        if not verify_claim(db, slot.cctv_id, slot.claim_version):
-                            slot.claim_lost = True
+                        try:
+                            if not verify_claim(db, slot.cctv_id, slot.claim_version):
+                                slot.claim_lost = True
+                        except (OperationalError, InterfaceError):
+                            # DB down; skip this check. The heartbeat table
+                            # still holds our last_seen from the last write;
+                            # CLAIM_EXPIRY_SEC keeps the claim valid for a
+                            # long window (default 300s).
+                            db = _recycle_session(db)
 
             if not any_new:
                 time.sleep(0.01)
@@ -413,10 +466,15 @@ def main() -> None:
             # time-based claim check - runs even when no frames arrive (reconnecting cameras)
             for slot in slots:
                 if not slot.claim_lost and now - slot.last_claim_check_ts >= CLAIM_CHECK_INTERVAL:
-                    if not verify_claim(db, slot.cctv_id, slot.claim_version):
-                        print(f"[worker] time-based verify_claim lost cctv={slot.cctv_id}, evicting")
-                        slot.claim_lost = True
-                    slot.last_claim_check_ts = now
+                    try:
+                        if not verify_claim(db, slot.cctv_id, slot.claim_version):
+                            print(f"[worker] time-based verify_claim lost cctv={slot.cctv_id}, evicting")
+                            slot.claim_lost = True
+                        slot.last_claim_check_ts = now
+                    except (OperationalError, InterfaceError):
+                        # DB down; skip and continue detecting. Do not update
+                        # last_claim_check_ts so we retry sooner.
+                        db = _recycle_session(db)
 
             # evict slots that lost their claim
             lost = [s for s in slots if s.claim_lost]
@@ -500,31 +558,56 @@ def process_detection(
     state = track_states[track_id]
     state.last_seen_ts = time.time()
 
-    if state.db_detection_id is None:
-        detection = models.Detection(
-            cctv_id=cctv_id,
-            track_id=track_id,
-            object_type=cls_name,
-            confidence=round(confidence, 4),
-            x1=round(x1 / frame_w, 4),
-            y1=round(y1 / frame_h, 4),
-            x2=round(x2 / frame_w, 4),
-            y2=round(y2 / frame_h, 4),
-        )
-        try:
-            db.add(detection)
-            db.flush()
-        except Exception as e:
-            print(f"[worker] detection write failed: {e}")
-            db.rollback()
-            return
+    is_new = state.db_detection_id is None and state.detection_uuid is None
 
-        state.db_detection_id = int(detection.id)  # type: ignore
+    if is_new:
+        if DURABLE_DETECTIONS:
+            detection_uuid = str(_uuid.uuid4())
+            initial_regions = [
+                r["id"] for r in regions
+                if is_point_in_polygon(center, [(p["x"], p["y"]) for p in r["region_points"]])
+            ]
+            for rid in initial_regions:
+                state.regions_entered.add(rid)
+            emit_detection(
+                detection_uuid=detection_uuid,
+                cctv_id=cctv_id,
+                track_id=track_id,
+                object_type=cls_name,
+                confidence=round(confidence, 4),
+                x1=round(x1 / frame_w, 4),
+                y1=round(y1 / frame_h, 4),
+                x2=round(x2 / frame_w, 4),
+                y2=round(y2 / frame_h, 4),
+                initial_region_ids=initial_regions,
+            )
+            state.detection_uuid = detection_uuid
+        else:
+            detection = models.Detection(
+                cctv_id=cctv_id,
+                track_id=track_id,
+                object_type=cls_name,
+                confidence=round(confidence, 4),
+                x1=round(x1 / frame_w, 4),
+                y1=round(y1 / frame_h, 4),
+                x2=round(x2 / frame_w, 4),
+                y2=round(y2 / frame_h, 4),
+            )
+            try:
+                db.add(detection)
+                db.flush()
+            except Exception as e:
+                print(f"[worker] detection write failed: {e}")
+                db.rollback()
+                return
+            state.db_detection_id = int(detection.id)  # type: ignore
+            for region in regions:
+                if is_point_in_polygon(center, [(p["x"], p["y"]) for p in region["region_points"]]):
+                    state.regions_entered.add(region["id"])
+                    if len(dir_buffer) >= MAX_BUFFER_SIZE:
+                        dir_buffer.popleft()
+                    dir_buffer.append({"region_id": region["id"], "detection_id": state.db_detection_id})
 
-        # Durable enforcement-event seam (opt-in via DURABLE_ENFORCEMENT=1).
-        # A new vehicle track becomes an enforcement candidate; plate OCR /
-        # violation rules will fill in `plate` / `event_type` later. Emission is
-        # best-effort and never blocks or crashes the detection loop.
         if EMIT_ENFORCEMENT and cls_name in ENFORCEMENT_CLASSES:
             emit_enforcement_event(
                 cctv_id=cctv_id,
@@ -532,15 +615,9 @@ def process_detection(
                 vehicle_type=cls_name,
                 confidence=confidence,
             )
-
-        for region in regions:
-            if is_point_in_polygon(center, [(p["x"], p["y"]) for p in region["region_points"]]):
-                state.regions_entered.add(region["id"])
-                if len(dir_buffer) >= MAX_BUFFER_SIZE:
-                    dir_buffer.popleft()
-                dir_buffer.append({"region_id": region["id"], "detection_id": state.db_detection_id})
         return
 
+    # Subsequent frames - record new region entries.
     for region in regions:
         region_id = region["id"]
         if (is_point_in_polygon(center, [(p["x"], p["y"]) for p in region["region_points"]])
@@ -548,12 +625,25 @@ def process_detection(
             state.regions_entered.add(region_id)
             if len(dir_buffer) >= MAX_BUFFER_SIZE:
                 dir_buffer.popleft()
-            dir_buffer.append({"region_id": region_id, "detection_id": state.db_detection_id})
+            if DURABLE_DETECTIONS:
+                dir_buffer.append({"region_id": region_id, "detection_uuid": state.detection_uuid})
+            else:
+                dir_buffer.append({"region_id": region_id, "detection_id": state.db_detection_id})
 
 
 def flush_detection_buffer(db: Session, dir_buffer: deque) -> None:
     items = list(dir_buffer)
     dir_buffer.clear()
+    if DURABLE_DETECTIONS:
+        for item in items:
+            emit_detection_region(
+                detection_uuid=item["detection_uuid"],
+                region_id=item["region_id"],
+            )
+        # No db.commit() here: durable mode does not write to the DB session
+        # in this path, and calling commit while the DB is down would raise
+        # OperationalError and kill the worker.
+        return
     try:
         if items:
             db.bulk_insert_mappings(models.DetectionInRegion, items)  # type: ignore

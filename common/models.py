@@ -151,7 +151,8 @@ class RegionPoint(Base):
 class Detection(Base):
     __tablename__ = "detections"
 
-    id          = Column(BigInteger, primary_key=True, autoincrement=True)
+    id             = Column(BigInteger, primary_key=True, autoincrement=True)
+    detection_uuid = Column(Text,       nullable=True, unique=True)
     cctv_id     = Column(Integer, ForeignKey("cctvs.id",  ondelete="CASCADE"),  nullable=True)
     video_id    = Column(Integer, ForeignKey("videos.id", ondelete="SET NULL"), nullable=True)
     track_id    = Column(Integer,    nullable=True)
@@ -177,10 +178,11 @@ class Detection(Base):
 class DetectionInRegion(Base):
     __tablename__ = "detections_in_regions"
 
-    id           = Column(Integer,    primary_key=True, autoincrement=True)
-    region_id    = Column(Integer,    ForeignKey("regions.id", ondelete="CASCADE"), nullable=False)
-    detection_id = Column(BigInteger, nullable=False)
-    time         = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    id             = Column(Integer,    primary_key=True, autoincrement=True)
+    region_id      = Column(Integer,    ForeignKey("regions.id", ondelete="CASCADE"), nullable=False)
+    detection_id   = Column(BigInteger, nullable=True)
+    detection_uuid = Column(Text,       nullable=True)
+    time           = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     region    = relationship("Region",    back_populates="detections_in_regions")
     detection = relationship(
         "Detection",

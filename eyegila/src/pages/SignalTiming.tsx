@@ -1,9 +1,13 @@
-import { useCallback, useEffect, useState } from 'react';
-import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useParams, useSearchParams } from 'react-router-dom';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer,
+  Tooltip as ChartTooltip, ResponsiveContainer,
 } from 'recharts';
+import {
+  Tooltip as UITooltip, TooltipContent, TooltipTrigger, TooltipProvider,
+} from '@/components/ui/tooltip';
+import { WARRANTS } from '@/lib/warrants';
 import { simulationApi, type SimulationChunk, type SimulationResponse } from '@/services/simulation';
 import { timingApi, type TimingChunk } from '@/services/timing';
 import { aggregationApi } from '@/services/aggregation';
@@ -11,7 +15,7 @@ import { streetsApi } from '@/services/streets';
 import { intersectionsApi } from '@/services/intersections';
 import { recommendationsApi, type RecommendationResponse } from '@/services/recommendations';
 import { IntersectionSummary } from '@/components/IntersectionSummary';
-import { ARM_SHORT, GanttDiagram, LosBadge } from '@/components/signal-timing-viz';
+import { ARM_SHORT, GanttDiagram } from '@/components/signal-timing-viz';
 import { ConfidenceBadge } from '@/components/ConfidenceBadge';
 import { useIntersectionShell } from '@/components/IntersectionShell';
 import { selectPeakChunk } from '@/lib/simulation';
@@ -27,7 +31,6 @@ import {
 } from '@/components/ui/dialog';
 import { TrendingDown, Play, Pause, Columns2, MonitorPlay, X, Info } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { toast } from 'sonner';
 import { JargonTip } from '@/components/JargonTip';
 import { deriveIntersectionAction, MONITOR_THRESHOLD_VH } from '@/lib/intersectionAction';
 
@@ -103,7 +106,7 @@ function ChunkQueueChart({ chunk }: { chunk: SimulationChunk }) {
           <CartesianGrid strokeDasharray="3 3" className="stroke-border" />
           <XAxis dataKey="minute" tick={{ fontSize: 11 }} tickFormatter={v => `${v}m`} />
           <YAxis tick={{ fontSize: 11 }} width={32} />
-          <Tooltip
+          <ChartTooltip
             contentStyle={{ fontSize: 11 }}
             formatter={(v, name) => [`${Number(v).toFixed(1)} veh`, name === 'current' ? 'Current timing' : 'Webster timing']}
           />
@@ -163,7 +166,6 @@ function InlineLosSquare({ grade }: { grade: string }) {
 
 export function SignalTimingPage() {
   const { id } = useParams<{ id: string }>();
-  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const intersectionId = Number(id);
 
@@ -272,22 +274,7 @@ export function SignalTimingPage() {
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
 
-  const [generating, setGenerating] = useState(false);
-  async function runAnalyse() {
-    if (!intersectionId) return;
-    setGenerating(true);
-    try {
-      await recommendationsApi.generate(intersectionId);
-      toast.success('Analysis complete');
-      await loadAll();
-    } catch (e: unknown) {
-      toast.error(e instanceof Error ? e.message : 'Analysis failed');
-    } finally {
-      setGenerating(false);
-    }
-  }
-
-  // When in historical mode, drive all visuals from histData; fall back to saved simulation
+// When in historical mode, drive all visuals from histData; fall back to saved simulation
   const displayData = histMode && histData ? histData : data;
 
   // null selectedChunk = "All" (aggregate view); specific name = per-chunk view
@@ -422,7 +409,7 @@ export function SignalTimingPage() {
           {!histMode && (displayData.signal_status === 'fixed_time' || displayData.signal_status === 'actuated') && !displayData.existing_cycle_s && (
             <div className="rounded-lg border border-rose-200 bg-rose-50 dark:bg-rose-950/20 dark:border-rose-900 px-4 py-3 text-xs text-rose-800 dark:text-rose-300">
               <span className="font-semibold">Before-state is an assumption, not measured data.</span>{' '}
-              This intersection is marked as {data.signal_status.replace('_', '-')} but no existing cycle length
+              This intersection is marked as {displayData.signal_status.replace('_', '-')} but no existing cycle length
               or green time per approach has been entered. The "before" delay is computed using an equal-split default
               and will understate or overstate the real improvement. Open Settings (cog icon in the header) to enter
               the current cycle length and per-approach splits.
@@ -479,7 +466,7 @@ export function SignalTimingPage() {
               : null;
             const vcCrit = sSim?.chunks?.length
               ? sSim.chunks.reduce((mx, c) => (c.vc_ratio_before ?? 0) > (mx ?? 0) ? (c.vc_ratio_before ?? 0) : mx, null as number | null)
-              : (ds?.vc_ratio_before ?? null);
+              : null;
             const confLabel = sRec.recommended_confidence != null
               ? sRec.recommended_confidence >= 0.75 ? 'High' : sRec.recommended_confidence >= 0.4 ? 'Medium' : 'Low'
               : 'High';
@@ -508,13 +495,13 @@ export function SignalTimingPage() {
                       <div className="flex items-baseline gap-2">
                         <span className="font-black tabular-nums leading-none text-emerald-900 dark:text-emerald-200"
                           style={{ fontSize: 38, fontFamily: "'Space Grotesk', sans-serif" }}>
-                          {rec.timing_cycle}
+                          {rec!.timing_cycle}
                         </span>
                         <span className="text-[15px] font-semibold text-emerald-700 dark:text-emerald-400">s optimal cycle</span>
                       </div>
                       <p className="text-[13px] text-emerald-700/80 dark:text-emerald-400/80 leading-relaxed -mt-1">
-                        {rec.major_volume != null && rec.minor_volume != null
-                          ? `${rec.major_volume.toLocaleString()} major · ${rec.minor_volume.toLocaleString()} minor vehicles/hr`
+                        {rec!.major_volume != null && rec!.minor_volume != null
+                          ? `${rec!.major_volume.toLocaleString()} major · ${rec!.minor_volume.toLocaleString()} minor vehicles/hr`
                           : action.detail}
                       </p>
                       <div className="flex items-center gap-2 mt-1">
@@ -655,34 +642,83 @@ export function SignalTimingPage() {
                   <p className="text-[12px] font-semibold text-muted-foreground mb-4">
                     The analysis · detections to action
                   </p>
+                  <TooltipProvider>
                   <div className="flex items-start">
-                    {([
-                      { label: 'Detections',    value: liveCount != null ? liveCount.toLocaleString() : '-', sub: `today · ${sCams.length} CCTV${sCams.length !== 1 ? 's' : ''}`, filled: liveCount != null },
-                      { label: 'CNN model',     value: wmLabels.length > 0 ? wmLabels.join(' · ') : '-',    sub: topConf > 0 ? `up to ${Math.round(topConf * 100)}%` : 'no warrants met', filled: wmLabels.length > 0 },
-                      { label: 'MUTCD verdict', value: wmLabels.length > 0 ? 'Passed' : 'Not met',           sub: wmLabels.length > 0 ? wmLabels.join('+') : 'no warrant met', filled: wmLabels.length > 0 },
-                      { label: 'Webster',       value: sRec.timing_cycle ? `${sRec.timing_cycle}s` : '-',   sub: 'optimal cycle', filled: !!sRec.timing_cycle },
-                      { label: 'Replays',       value: sSim?.chunks?.length ? `${sSim.chunks.length * 20} runs` : '100 runs', sub: `LOS ${ds?.los_before ?? '?'}→${ds?.los_after ?? '?'} stable`, filled: true },
-                      { label: 'Action',        value: sAction.kind === 'install_signal' ? 'Signalize' : sAction.kind === 'adjust_timing' ? 'Retime' : sAction.kind === 'widen_lanes' ? 'Widen' : sAction.kind === 'monitor' ? 'Monitor' : 'Review', sub: 'reconciled', filled: true, isLast: true },
-                    ] as const).map((node, idx, arr) => (
-                      <div key={idx} className="flex-1 flex flex-col items-center text-center gap-2 min-w-0">
-                        <div className="flex items-center w-full">
-                          <div className={cn('flex-1 h-px', idx === 0 ? 'bg-transparent' : 'bg-border')} />
-                          <div className={cn('size-4 rounded-full border-2 shrink-0',
-                            node.isLast ? 'bg-emerald-500 border-emerald-500 ring-4 ring-emerald-500/20'
-                            : node.filled ? 'bg-emerald-500 border-emerald-500'
-                            : 'bg-card border-border'
-                          )} />
-                          <div className={cn('flex-1 h-px', idx === arr.length - 1 ? 'bg-transparent' : 'bg-border')} />
+                    {(() => {
+                      const actionDot =
+                        sAction.kind === 'install_signal' ? 'bg-yellow-400 border-yellow-400 ring-yellow-400/20' :
+                        sAction.kind === 'adjust_timing'  ? 'bg-sky-500 border-sky-500 ring-sky-500/20' :
+                        sAction.kind === 'widen_lanes'    ? 'bg-red-500 border-red-500 ring-red-500/20' :
+                                                            'bg-emerald-500 border-emerald-500 ring-emerald-500/20';
+                      const filledDot =
+                        sAction.kind === 'install_signal' ? 'bg-yellow-400 border-yellow-400' :
+                        sAction.kind === 'adjust_timing'  ? 'bg-sky-500 border-sky-500' :
+                        sAction.kind === 'widen_lanes'    ? 'bg-red-500 border-red-500' :
+                                                            'bg-emerald-500 border-emerald-500';
+                      const filledLine =
+                        sAction.kind === 'install_signal' ? 'bg-yellow-400/50' :
+                        sAction.kind === 'adjust_timing'  ? 'bg-sky-500/50' :
+                        sAction.kind === 'widen_lanes'    ? 'bg-red-500/50' :
+                                                            'bg-emerald-500/50';
+                      const cnnValue: ReactNode = wmLabels.length > 0
+                        ? (
+                          <span className="inline-flex flex-wrap gap-1 justify-center">
+                            {wmLabels.map(code => {
+                              const info = WARRANTS.find(w => w.code === code);
+                              return (
+                                <UITooltip key={code}>
+                                  <TooltipTrigger asChild>
+                                    <span className="font-bold font-mono cursor-help underline decoration-dotted underline-offset-2 decoration-muted-foreground/50">
+                                      {code}
+                                    </span>
+                                  </TooltipTrigger>
+                                  <TooltipContent side="bottom" className="max-w-[220px] text-left p-2.5 leading-snug">
+                                    <p className="font-semibold text-[11px]">{info?.name ?? code}</p>
+                                    <p className="text-[10px] mt-1 opacity-80">{info?.triggersWhen}</p>
+                                  </TooltipContent>
+                                </UITooltip>
+                              );
+                            })}
+                          </span>
+                        )
+                        : '-';
+                      return ([
+                        (() => {
+                          const majorMinor = (sRec.major_volume ?? 0) + (sRec.minor_volume ?? 0);
+                          return {
+                            label: 'Detections',
+                            value: majorMinor > 0 ? majorMinor.toLocaleString() : (liveCount != null ? liveCount.toLocaleString() : '-') as ReactNode,
+                            sub:   majorMinor > 0 ? `peak-hour vph · ${sCams.length} CCTV${sCams.length !== 1 ? 's' : ''}` : `today · ${sCams.length} CCTV${sCams.length !== 1 ? 's' : ''}`,
+                            filled: majorMinor > 0 || liveCount != null,
+                          };
+                        })(),
+                        { label: 'CNN model',     value: cnnValue,    sub: topConf > 0 ? `up to ${Math.round(topConf * 100)}%` : 'no warrants met', filled: wmLabels.length > 0 },
+                        { label: 'MUTCD verdict', value: wmLabels.length > 0 ? 'Passed' : 'Not met',           sub: wmLabels.length > 0 ? wmLabels.join('+') : 'no warrant met', filled: wmLabels.length > 0 },
+                        { label: 'Webster',       value: sRec.timing_cycle ? `${sRec.timing_cycle}s` : '-',   sub: 'optimal cycle', filled: !!sRec.timing_cycle },
+                        { label: 'Replays',       value: sSim?.chunks?.length ? `${sSim.chunks.length * 20} runs` : '100 runs', sub: `LOS ${ds?.los_before ?? '?'}→${ds?.los_after ?? '?'} stable`, filled: true },
+                        { label: 'Action',        value: sAction.kind === 'install_signal' ? 'Signalize' : sAction.kind === 'adjust_timing' ? 'Retime' : sAction.kind === 'widen_lanes' ? 'Widen' : sAction.kind === 'monitor' ? 'Monitor' : 'Review', sub: 'reconciled', filled: true, isLast: true },
+                      ] as { label: string; value: ReactNode; sub: string; filled: boolean; isLast?: boolean }[]).map((node, idx, arr) => (
+                        <div key={idx} className="flex-1 flex flex-col items-center text-center gap-2 min-w-0">
+                          <div className="flex items-center w-full">
+                            <div className={cn('flex-1 h-px', idx === 0 ? 'bg-transparent' : node.filled ? filledLine : 'bg-border')} />
+                            <div className={cn('size-4 rounded-full border-2 shrink-0',
+                              node.isLast ? `${actionDot} ring-4`
+                              : node.filled ? filledDot
+                              : 'bg-card border-border'
+                            )} />
+                            <div className={cn('flex-1 h-px', idx === arr.length - 1 ? 'bg-transparent' : node.filled && arr[idx + 1]?.filled ? filledLine : 'bg-border')} />
+                          </div>
+                          <div>
+                            <div className="text-[11px] font-semibold text-muted-foreground">{node.label}</div>
+                            <div className="text-[16px] font-bold text-foreground mt-1 tabular-nums leading-none"
+                              style={{ fontFamily: "'Space Grotesk', sans-serif" }}>{node.value}</div>
+                            <div className="text-[10px] text-muted-foreground mt-1">{node.sub}</div>
+                          </div>
                         </div>
-                        <div>
-                          <div className="text-[11px] font-semibold text-muted-foreground">{node.label}</div>
-                          <div className="text-[16px] font-bold text-foreground mt-1 tabular-nums leading-none"
-                            style={{ fontFamily: "'Space Grotesk', sans-serif" }}>{node.value}</div>
-                          <div className="text-[10px] text-muted-foreground mt-1">{node.sub}</div>
-                        </div>
-                      </div>
-                    ))}
+                      ));
+                    })()}
                   </div>
+                  </TooltipProvider>
                 </div>
 
                 {/* Monte Carlo simulation confidence - third section inside the box */}
@@ -764,7 +800,7 @@ export function SignalTimingPage() {
                     Avg delay &middot; proposed <JargonTip term="websters" />
                   </p>
                   <div className="flex items-center gap-2 mt-2">
-                    <p className="text-[22px] font-bold tabular-nums leading-none text-emerald-600">{fmt(delayAfter)}</p>
+                    <p className={cn('text-[22px] font-bold tabular-nums leading-none', delayBefore != null && delayAfter != null ? deltaClass(delayBefore, delayAfter) : '')}>{fmt(delayAfter)}</p>
                     <InlineLosSquare grade={losAfter} />
                   </div>
                   <p className="text-[11px] text-muted-foreground mt-1">per vehicle</p>
@@ -1144,7 +1180,7 @@ export function SignalTimingPage() {
           {/* Minimal header */}
           <div className="flex items-center justify-between px-6 py-3 shrink-0">
             <div className="flex items-center gap-3">
-              <span className="text-base font-semibold text-white">{displayData.intersection_name}</span>
+              <span className="text-base font-semibold text-white">{displayData!.intersection_name}</span>
               <span className="text-[11px] text-white/40 font-mono">{activeChunk.chunk_name}</span>
             </div>
             <div className="flex items-center gap-6">
@@ -1226,7 +1262,7 @@ export function SignalTimingPage() {
               <DualIntersectionCanvas
                 chunk={activeChunk}
                 timing={activeTiming}
-                signalStatus={displayData.signal_status}
+                signalStatus={displayData!.signal_status}
                 typeMix={typeMix}
                 paused={paused3D}
                 speed={speed3D}
@@ -1243,7 +1279,7 @@ export function SignalTimingPage() {
                 volumePcuHr={activeChunk.volume_pcu_hr}
                 typeMix={typeMix}
                 showBefore={show3DBefore}
-                signalStatus={displayData.signal_status}
+                signalStatus={displayData!.signal_status}
                 existingCycleS={intersection?.existing_cycle_length ?? null}
                 existingGreenSplits={intersection?.existing_green_splits ?? null}
                 paused={paused3D}
@@ -1263,7 +1299,7 @@ export function SignalTimingPage() {
                     volumePcuHr={effectiveVolumePcuHr}
                     typeMix={typeMix}
                     showBefore={true}
-                    signalStatus={displayData.signal_status}
+                    signalStatus={displayData!.signal_status}
                     existingCycleS={intersection?.existing_cycle_length ?? null}
                     existingGreenSplits={intersection?.existing_green_splits ?? null}
                     paused={paused3D}
@@ -1281,7 +1317,7 @@ export function SignalTimingPage() {
                     volumePcuHr={effectiveVolumePcuHr}
                     typeMix={typeMix}
                     showBefore={false}
-                    signalStatus={displayData.signal_status}
+                    signalStatus={displayData!.signal_status}
                     existingCycleS={intersection?.existing_cycle_length ?? null}
                     existingGreenSplits={intersection?.existing_green_splits ?? null}
                     paused={paused3D}

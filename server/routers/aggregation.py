@@ -47,14 +47,12 @@ async def aggregation_pusher():
         db = SessionLocal()
         try:
             db.execute(text("SET LOCAL statement_timeout = '30s'"))
-            # Per the consumer contract in eyegila/src/pages/Manual.tsx:
-            #   "the latest 1-minute bucket counts per intersection and street"
-            # Bounds: the half-open current-minute window
-            #   [start-of-current-minute, start-of-next-minute).
-            # The lower bound prevents scanning today's ~600k rows every tick.
-            # The upper bound caps to exactly one minute - without it, the
-            # seeder's future-dated rows (used for warrant analyses) would all
-            # match and explode the row count (475k+) into a statement timeout.
+            # Day-to-date window: [start-of-local-day, NOW()). "Daily count /
+            # rolling live" on the dashboard is the accumulating today total,
+            # so a one-minute window (previous behaviour) reset every 60 s
+            # showed 0 most of the time. The NOW() upper bound excludes the
+            # seeder's future-dated rows (used for warrant analyses) which
+            # would otherwise blow the row count past the statement_timeout.
             rows = db.execute(text("""
                 SELECT
                     intersection_id,
@@ -62,11 +60,11 @@ async def aggregation_pusher():
                     street_id,
                     direction,
                     object_type,
-                    DATE_TRUNC('minute', NOW() AT TIME ZONE :tz) AS window_start,
-                    COUNT(*)::int                                 AS count
+                    DATE_TRUNC('day', NOW() AT TIME ZONE :tz) AS window_start,
+                    COUNT(*)::int                              AS count
                 FROM detection_street_view
-                WHERE time >= DATE_TRUNC('minute', NOW() AT TIME ZONE :tz) AT TIME ZONE :tz
-                  AND time <  DATE_TRUNC('minute', NOW() AT TIME ZONE :tz) AT TIME ZONE :tz + INTERVAL '1 minute'
+                WHERE time >= DATE_TRUNC('day', NOW() AT TIME ZONE :tz) AT TIME ZONE :tz
+                  AND time <  NOW()
                 GROUP BY intersection_id, intersection_name, street_id, direction, object_type
                 ORDER BY intersection_id, street_id, direction, object_type
             """), {"tz": _TZ}).fetchall()

@@ -54,12 +54,6 @@ services:
     image: redis:7-alpine
     container_name: redis
     restart: unless-stopped
-    # AOF persistence so the durable enforcement-event buffer survives a Redis
-    # restart. everysec = at most ~1s of buffered events lost on a hard crash,
-    # negligible fsync cost. Data lands in the redis_data volume.
-    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
-    volumes:
-      - redis_data:/data
     ports:
       - "6379:6379"
     healthcheck:
@@ -137,9 +131,9 @@ services:
       VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
       UPLOAD_DIR: /app/uploads
       MODEL_VERSION: ${MODEL_VERSION:-eyegila_v4}
-      # Canonical in-container path for the mounted model weights file.
-      # video_job.py reads this via os.getenv("MODEL_PATH", "/app/model.pt").
       MODEL_PATH: /app/model.pt
+      DURABLE_ENFORCEMENT: ${DURABLE_ENFORCEMENT:-1}
+      DURABLE_DETECTIONS: ${DURABLE_DETECTIONS:-1}
     volumes:
       - upload_data:/app/uploads
       - ./rq-worker:/app/rq-worker
@@ -159,10 +153,27 @@ services:
   sink:
     build:
       context: .
-      dockerfile: rq-worker/Dockerfile
+      dockerfile: ${RQ_WORKER_DOCKERFILE:-rq-worker/Dockerfile}
     container_name: enforcement-sink
     restart: unless-stopped
     command: python -m sink.sink
+    environment:
+      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgresql://postgres:postgres@pgbouncer:5432/traffic
+    volumes:
+      - ./common:/app/common
+      - ./sink:/app/sink
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  detection-sink:
+    build:
+      context: .
+      dockerfile: ${RQ_WORKER_DOCKERFILE:-rq-worker/Dockerfile}
+    container_name: detection-sink
+    restart: unless-stopped
+    command: python -m sink.detection_sink
     environment:
       REDIS_URL: redis://redis:6379
       DATABASE_URL: postgresql://postgres:postgres@pgbouncer:5432/traffic
@@ -194,8 +205,9 @@ services:
       WORKER_FRAME_JPEG_QUALITY: ${WORKER_FRAME_JPEG_QUALITY:-75}
       FERNET_KEY: ${FERNET_KEY:-}
       MODEL_VERSION: ${MODEL_VERSION:-eyegila_v4}
-      # Canonical in-container path for the mounted model weights.
       MODEL_PATH: /app/model.pt
+      DURABLE_ENFORCEMENT: ${DURABLE_ENFORCEMENT:-1}
+      DURABLE_DETECTIONS: ${DURABLE_DETECTIONS:-1}
     volumes:
       - ./worker:/app/worker
       - ./common:/app/common

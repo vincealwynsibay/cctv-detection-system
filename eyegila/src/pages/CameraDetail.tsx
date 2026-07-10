@@ -209,9 +209,7 @@ export function CameraDetailPage() {
   const { token } = useContext(AuthContext);
   const navigate = useNavigate();
 
-  const backPath = intersectionId ? `/intersections/${intersectionId}` : -1 as const;
-
-  const [cctv, setCctv] = useState<CCTV | null>(null);
+const [cctv, setCctv] = useState<CCTV | null>(null);
   const [intersection, setIntersection] = useState<Intersection | null>(null);
   const [streets, setStreets] = useState<Street[]>([]);
   const [regions, setRegions] = useState<RegionWithName[]>([]);
@@ -285,7 +283,7 @@ export function CameraDetailPage() {
   useEffect(() => {
     async function checkWorker() {
       try {
-        const data = await request(`/cctvs/${cctv_id}/worker-status`);
+        const data = await request<{ worker_live: boolean }>(`/cctvs/${cctv_id}/worker-status`);
         setWorkerLive(data.worker_live);
       } catch { setWorkerLive(false); }
     }
@@ -605,7 +603,7 @@ export function CameraDetailPage() {
     <div className="flex flex-col gap-6">
       {/* Header */}
       <div className="flex items-center gap-3">
-        <Button variant="ghost" size="icon" className="size-8" onClick={() => navigate(backPath)}>
+        <Button variant="ghost" size="icon" className="size-8" onClick={() => intersectionId ? navigate(`/intersections/${intersectionId}`) : navigate(-1)}>
           <ArrowLeft className="size-4" />
         </Button>
         <div className="flex-1">

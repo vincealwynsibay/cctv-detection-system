@@ -353,11 +353,11 @@ export function ManualPage() {
 
               <Sub>Live Dashboard</Sub>
               <p className="text-sm text-muted-foreground mb-2">
-                The Dashboard receives an SSE event every 5 seconds from <Code>/aggregation/stream</Code>. Each event contains the latest 1-minute bucket counts per intersection and street.
+                The Dashboard receives an SSE event every 5 seconds from <Code>/aggregation/stream</Code>. Each event contains day-to-date counts per intersection and street (accumulating from local midnight up to now).
               </p>
               <ul className="text-sm text-muted-foreground list-disc pl-5 space-y-1 mb-2">
                 <li>The <strong>Live</strong> indicator in the header shows the SSE connection status.</li>
-                <li>Counts come from the <Code>aggregation_summaries</Code> continuous aggregate view (1-minute buckets).</li>
+                <li>Counts come from <Code>detection_street_view</Code> aggregated over the current day.</li>
                 <li>Click an intersection card to focus on its per-street breakdown and trend chart.</li>
                 <li>Switch to <strong>Map view</strong> to see all camera locations on OpenStreetMap.</li>
               </ul>

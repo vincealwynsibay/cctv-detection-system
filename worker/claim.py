@@ -4,7 +4,12 @@ from common import models
 import time
 import os
 
-CLAIM_EXPIRY_SEC = 15
+# Longer TTL protects an existing claim across DB-outage windows: while the DB
+# is unreachable the worker cannot refresh its heartbeat, but the row it wrote
+# on the last successful heartbeat remains fresh enough that no other worker
+# will steal the camera for CLAIM_EXPIRY_SEC. Tradeoff: real worker deaths take
+# up to that same window to be reclaimed by a surviving peer.
+CLAIM_EXPIRY_SEC = int(os.getenv("CLAIM_EXPIRY_SEC", "300"))
 POLL_INTERVAL_SEC = 5
 
 def try_claim_camera(db: Session) -> tuple[models.CCTV, int] | None:

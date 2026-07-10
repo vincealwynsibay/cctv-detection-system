@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { Link, useOutletContext } from 'react-router-dom';
 import { MapContainer, TileLayer, CircleMarker, Popup, useMap } from 'react-leaflet';
-import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { toast } from 'sonner';
 import { intersectionsApi } from '@/services/intersections';
@@ -17,7 +16,6 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Progress } from '@/components/ui/progress';
 import {
   Plus, Settings2, WifiOff, Wifi, RefreshCw,
   Loader2, TrendingUp, AlertTriangle,
@@ -211,7 +209,7 @@ function formatPeakHour(iso: string | null): string {
 
 // ── Action colour language ───────────────────────────────────────────────────
 // One severity ramp for the whole card so its bar, badge and cycle line never
-// disagree: green = nothing to do, sky = timing tweak, amber = install a signal,
+// disagree: green = nothing to do, sky = timing tweak, yellow = install a signal,
 // red = widen, slate = monitor. Sourcing colour from the reconciled action (not
 // the raw warrant bucket) is what fixes "green says it passed but I'm still told
 // to retime": a warranted-but-signalized intersection is a timing update (sky),
@@ -219,7 +217,7 @@ function formatPeakHour(iso: string | null): string {
 const ACTION_BAR: Record<ActionKind, string> = {
   no_action:      'bg-emerald-500',
   adjust_timing:  'bg-sky-500',
-  install_signal: 'bg-amber-500',
+  install_signal: 'bg-yellow-400',
   widen_lanes:    'bg-red-500',
   monitor:        'bg-slate-400',
   no_analysis:    'bg-muted/40',
@@ -228,7 +226,7 @@ const ACTION_BAR: Record<ActionKind, string> = {
 const ACTION_BADGE: Record<ActionKind, { label: string; className: string }> = {
   no_action:      { label: 'Within warrants',  className: 'border-emerald-500/40 text-emerald-700 bg-emerald-50 dark:text-emerald-300 dark:bg-emerald-950/30' },
   adjust_timing:  { label: 'Timing update',    className: 'border-sky-500/40 text-sky-700 bg-sky-50 dark:text-sky-400 dark:bg-sky-950/30' },
-  install_signal: { label: 'Signal warranted', className: 'border-amber-500/40 text-amber-700 bg-amber-50 dark:text-amber-300 dark:bg-amber-950/30' },
+  install_signal: { label: 'Signal warranted', className: 'border-yellow-400/60 text-yellow-700 bg-yellow-50 dark:text-yellow-300 dark:bg-yellow-950/30' },
   widen_lanes:    { label: 'Widen lanes',      className: 'border-red-500/40 text-red-700 bg-red-50 dark:text-red-300 dark:bg-red-950/30' },
   monitor:        { label: 'Monitor',          className: 'border-slate-400/40 text-slate-600 bg-slate-50 dark:text-slate-300 dark:bg-slate-900/30' },
   no_analysis:    { label: 'No analysis yet',  className: 'border-muted text-muted-foreground bg-muted/40' },
@@ -305,7 +303,7 @@ function IntersectionCard({ inter, cameras, rec, streets, liveCount, dailyStats,
                 {inter.signal_status.replace('_', ' ')}
               </Badge>
               <WarrantBadge rec={rec} inter={inter} />
-              {rec && <WarrantReference rec={rec} intersectionName={inter.name} />}
+              {rec && <WarrantReference rec={rec} intersectionName={inter.name} actionKind={action?.kind} />}
             </div>
           </div>
           <button
@@ -591,7 +589,7 @@ const KIND_CHIP: Record<InterventionKind, { label: string; className: string }> 
   },
   signalize: {
     label: 'Signalize',
-    className: 'bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300',
+    className: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-950/40 dark:text-yellow-300',
   },
   timing_only: {
     label: 'Adjust',
@@ -786,7 +784,6 @@ function NeedsActionBigRow({ item, nowMs }: { item: ActionItem; nowMs: number })
 function NeedsActionCard({
   deploy,
   escalate,
-  later,
   currentChunkName,
   nowMs,
 }: {
